@@ -61,9 +61,9 @@ struct Target {
     #[serde(default)]
     routing_values: Option<HashMap<String, String>>,
     #[serde(default)]
-    timeout_seconds: Option<u64>, // Optional timeout in seconds
+    timeout_seconds: Option<u64>, 
     #[serde(default)]
-    cache_config: Option<CacheConfig>,  // Optional cache configuration
+    cache_config: Option<CacheConfig>, 
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -190,29 +190,29 @@ enum CircuitState {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 enum RateLimiterConfig {
     TokenBucket {
-        refill_rate: u64, // Tokens per second
+        refill_rate: u64, 
         burst_capacity: u64,
-        header_key: Option<String>, // Optional header key for dynamic rate limiting
+        header_key: Option<String>, 
     },
     LeakyBucket {
-        leak_rate: u64, // Tokens per second
+        leak_rate: u64, 
         bucket_size: u64,
-        header_key: Option<String>, // Optional header key for dynamic rate limiting
+        header_key: Option<String>, 
     },
     FixedWindow {
-        rate: u64, // Requests per window
+        rate: u64, 
         window_seconds: u64,
-        header_key: Option<String>, // Optional header key for dynamic rate limiting
+        header_key: Option<String>, 
     },
     SlidingLog {
-        rate: u64, // Requests per window
+        rate: u64, 
         window_seconds: u64,
-        header_key: Option<String>, // Optional header key for dynamic rate limiting
+        header_key: Option<String>, 
     },
     SlidingWindow {
-        rate: u64, // Requests per window
+        rate: u64, 
         window_seconds: u64,
-        header_key: Option<String>, // Optional header key for dynamic rate limiting
+        header_key: Option<String>, 
     },
 }
 
@@ -228,7 +228,7 @@ impl Default for RateLimiterConfig {
 
 #[derive(Debug)]
 enum RateLimiter {
-    TokenBucket(Arc<Semaphore>, u64, String), // Arc<Semaphore> for shared ownership
+    TokenBucket(Arc<Semaphore>, u64, String), 
     LeakyBucket(RwLock<LeakyBucketState>, String),
     FixedWindow(RwLock<FixedWindowState>, String),
     SlidingLog(RwLock<SlidingLogState>, String),
@@ -351,13 +351,12 @@ impl RateLimiter {
         match self {
             RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
                 if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    let permit = Arc::new(permit); // Wrap permit in an Arc
+                    let permit = Arc::new(permit); 
                     let refill_rate = *refill_rate;
                     tokio::spawn(async move {
                         let delay = Duration::from_secs(1) / refill_rate as u32;
                         loop {
                             sleep(delay).await;
-                            // Drop the permit here, within the loop
                             drop(permit.clone());
                         }
                     });
@@ -440,15 +439,15 @@ struct ProxyState {
             Option<Vec<Transform>>,
             Option<CircuitBreakerConfig>,
             Option<RateLimiterConfig>,
-            Option<String>, // routing_header
-            Option<HashMap<String, String>>, // routing_values
-            Option<u64>, // timeout_seconds
-            Option<CacheConfig>, // Cache configuration
+            Option<String>,
+            Option<HashMap<String, String>>, 
+            Option<u64>, 
+            Option<CacheConfig>, 
         ),
     >,
     circuit_breakers: RwLock<HashMap<String, CircuitBreaker>>,
     rate_limiters: RwLock<HashMap<String, RateLimiter>>,
-    caches: RwLock<HashMap<String, Cache>>, // Caches for each target
+    caches: RwLock<HashMap<String, Cache>>,
 }
 
 
@@ -456,10 +455,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
     
-    // Ensure the sender and receiver match the expected structure
     let (target_map_sender, target_map_receiver) = watch::channel(build_target_map(&config.targets));
 
-    // Spawn watch_config with the correct type
     tokio::spawn(watch_config(target_map_sender));
 
     let retry_config = Arc::new(config.retries);
@@ -473,12 +470,10 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let initial_target_map = target_map_receiver.borrow().clone();
 
-    // Initialize caches based on initial configuration if CacheConfig is present
     let caches = RwLock::new(
         initial_target_map.iter()
             .filter_map(|(path, (_, _, _, _, _, _, _, _, _, cache_config))| {
                 cache_config.as_ref().map(|config| {
-                    // Correct way: Pass the whole config object as a reference
                     (path.clone(), Cache::new(config))
                 })
             })
@@ -546,7 +541,7 @@ fn build_target_map(
         Option<String>,
         Option<HashMap<String, String>>,
         Option<u64>,
-        Option<CacheConfig>,  // Ensure this is included
+        Option<CacheConfig>, 
     ),
 > {
     let mut map = HashMap::new();
@@ -563,7 +558,7 @@ fn build_target_map(
                 target.routing_header.clone(),
                 target.routing_values.clone(),
                 target.timeout_seconds,
-                target.cache_config.clone(),  // Include cache_config here
+                target.cache_config.clone(), 
             ),
         );
     }
@@ -583,7 +578,6 @@ async fn proxy_request(
     let path = original_req.uri().path().to_string();
     info!("Handling request for path: {}", path);
 
-    // Extract the target configuration for the current path
     let (
         target_url,
         target_url_len,
@@ -753,7 +747,6 @@ async fn proxy_request(
                         circuit_breaker.record_success();
                     }
 
-                    // Extract the body to read it
                     let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                     if let Some(cache_config) = &target_cache_config {
                         let cache_key = format!("{}:{}", target_url, original_req.uri().query().unwrap_or(""));
@@ -763,7 +756,6 @@ async fn proxy_request(
                         let cache = caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
                         cache.put(cache_key, response_data.to_vec()).await;
 
-                        // Set the body back to the response
                         *resp.body_mut() = Body::from(response_data);
                     }
 
@@ -868,7 +860,6 @@ fn apply_header_transforms(
                 {
                     let header_value = match transform.value.as_ref() {
                         Some(value) => {
-                            // Using static when possible, otherwise from a string
                             HeaderValue::from_str(value).unwrap_or_else(|_| {
                                 HeaderValue::from_static("")
                             })
@@ -897,7 +888,6 @@ fn apply_header_transforms(
                             headers.insert(header_name, new_header_value);
                         }
                     } else {
-                        // If the header is not already present, set it as new
                         let header_value = HeaderValue::from_str(
                             &transform.value.as_ref().unwrap_or(&"".to_string()),
                         )
@@ -972,7 +962,6 @@ struct RetryConfig {
     strategy: String,
     base_delay_seconds: u64,
     max_attempts: usize,
-    // Additional parameters based on strategy
     factor: Option<f64>,
     step_delay_seconds: Option<u64>,
 }
@@ -983,52 +972,52 @@ impl RetryConfig {
             "ExponentialBackoff" => Box::new(ExponentialBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.factor.unwrap_or(2.0),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "LinearBackoff" => Box::new(LinearBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds)),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "FixedInterval" => Box::new(FixedIntervalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "RandomDelay" => Box::new(RandomDelayStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds * 2)),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "IncrementalBackoff" => Box::new(IncrementalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(1)),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "FibonacciBackoff" => Box::new(FibonacciBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "GeometricBackoff" => Box::new(GeometricBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.factor.unwrap_or(2.0),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "HarmonicBackoff" => Box::new(HarmonicBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
             "JitterBackoff" => Box::new(JitterBackoffStrategy::new(
                 Box::new(ExponentialBackoffStrategy::new(
                     Duration::from_secs(self.base_delay_seconds),
                     self.factor.unwrap_or(2.0),
-                    self.max_attempts // Ensure max_attempts is passed here too
+                    self.max_attempts 
                 )),
-                0.5, // Example jitter factor, could be configurable
-                self.max_attempts, // Ensure max_attempts is passed
+                0.5, 
+                self.max_attempts, 
             )),
             _ => Box::new(FixedIntervalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, // Ensure max_attempts is passed
+                self.max_attempts, 
             )),
         }
     }
@@ -1037,10 +1026,9 @@ impl RetryConfig {
 
 
 /// Trait for defining different retry strategies.
-/// Trait for defining different retry strategies.
 pub trait RetryStrategy: Send + Sync {
     fn delay(&mut self) -> Duration;
-    fn max_attempts(&self) -> usize;  // Method to return the max number of attempts
+    fn max_attempts(&self) -> usize;
 }
 
 
@@ -1073,7 +1061,6 @@ impl RetryStrategy for FixedIntervalBackoffStrategy {
 }
 
 
-/// Exponential Backoff Strategy
 /// Exponential Backoff Strategy
 pub struct ExponentialBackoffStrategy {
     base_delay: Duration,
@@ -1331,8 +1318,6 @@ impl RetryStrategy for JitterBackoffStrategy {
 }
 
 
-
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
     ttl_seconds: u64,       // Time to live: Duration in seconds that the cache is valid
@@ -1391,9 +1376,8 @@ impl Cache {
             },
             expires_at: Instant::now() + self.ttl,
         };
-        // Clone the key before passing it to the `put` method
         entries.put(key.clone(), entry);
-        info!("Cache updated for key: {}", key);  // No error here because `key` is cloned before `put`
+        info!("Cache updated for key: {}", key); 
     }
     
     
