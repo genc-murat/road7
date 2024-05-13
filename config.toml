@@ -1,0 +1,57 @@
+# Server configuration
+[server]
+host = "127.0.0.1"
+port = 3000
+
+# Default retry configuration for all targets (if not overridden per target)
+[retries]
+strategy = "FixedInterval"
+max_attempts = 2
+base_delay_seconds = 2
+
+# Default circuit breaker configuration for all targets (if not overridden per target)
+[default_circuit_breaker_config]
+max_failures = 3
+reset_timeout_seconds = 30
+half_open_attempts = 2
+
+# List of target configurations
+[[targets]]
+path = "/api/service1"
+url = "http://localhost:5001"
+# Optional retry configuration for this specific target
+retries = { strategy = "FixedInterval", max_attempts = 3, base_delay_seconds = 1 }
+routing_header = "X-Api-Version"
+routing_values = { "v1" = "http://localhost:5001/v1", "v2" = "http://localhost:5001/v2" }
+
+# Optional circuit breaker configuration for this specific target
+circuit_breaker_config = { max_failures = 2, reset_timeout_seconds = 5, half_open_attempts = 1 }
+
+# Optional request transformations for this target
+request_transforms = [
+    { type = "Header", name = "X-Proxy-Inject", value = "Service1", operation = "Set" }
+]
+
+# Optional response transformations for this target
+response_transforms = [
+    { type = "Header", name = "X-Proxy-Modified", value = "true", operation = "Set" }
+]
+
+[[targets]]
+path = "/api/service2"
+url = "http://localhost:5001"
+timeout_seconds = 3
+# This target uses the default retry and circuit breaker configuration
+rate_limiter_config = { TokenBucket = { refill_rate = 2, burst_capacity = 5, header_key = "Client-ID" } }
+cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
+
+[[targets]]
+path = "/api/service3"
+url = "http://localhost:9003"
+# Specific retry configuration for this target
+retries = { strategy = "FixedInterval", max_attempts = 4, base_delay_seconds = 1 }
+# Specific circuit breaker configuration for this target
+circuit_breaker_config = { max_failures = 1, reset_timeout_seconds = 10, half_open_attempts = 1 }
+
+[default_rate_limiter_config]
+TokenBucket = { refill_rate = 10, burst_capacity = 20 } # Default is a Token Bucket

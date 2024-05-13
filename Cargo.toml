@@ -1,0 +1,21 @@
+[package]
+name = "road7"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "0.14", features = ["full"] }
+hyper-tls = "0.5"
+rustls = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.5"
+config = "0.11"
+log = "0.4"
+env_logger = "0.9" 
+http = "0.2"
+tokio-util = "0.7"
+futures-util = "0.3"
+rand = "0.8.5"
+lru = "0.7" 
