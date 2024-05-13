@@ -1,5 +1,9 @@
 # Road7
 
+<div align="center">
+    <img src="/road7logo.webp">
+</div>
+
 Road7 is a highly configurable and efficient HTTP proxy server designed to handle a multitude of scenarios including dynamic routing, retries, circuit breaking, rate limiting, transformations, and caching. It is built using Rust and the Hyper library to ensure high performance and concurrency.
 
 ## Features Overview
