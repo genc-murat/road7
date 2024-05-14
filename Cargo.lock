@@ -854,6 +854,7 @@ dependencies = [
  "hyper-tls",
  "lru",
  "rand",
+ "regex",
  "rustls 0.20.9",
  "serde 1.0.201",
  "serde_json",

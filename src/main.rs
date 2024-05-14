@@ -20,6 +20,7 @@ use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use http::header::{HeaderMap, HeaderName};
 use std::borrow::Cow;
+use regex::Regex;  // Import regex for validation
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -604,6 +605,15 @@ async fn proxy_request<C>(
 where
     C: hyper::client::connect::Connect + Clone + Send + Sync + 'static,
 {
+    // Validate the incoming request
+    if let Err(validation_error) = validate_request(&original_req).await {
+        error!("Request validation failed: {}", validation_error);
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(validation_error))
+            .unwrap());
+    }
+
     // Acquire a permit from the semaphore
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
@@ -858,7 +868,6 @@ where
 }
 
 
-
 fn rebuild_request(
     original_req: &Request<Body>,
     target_url: &str,
@@ -983,7 +992,6 @@ fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     settings.merge(config::File::with_name("config")).unwrap();
     settings.try_into()
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct RetryConfig {
@@ -1406,4 +1414,28 @@ fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
         value.hash(&mut hasher);
     });
     format!("{:x}", hasher.finish())
+}
+
+async fn validate_request(req: &Request<Body>) -> Result<(), String> {
+    let uri = req.uri().to_string();
+    let uri_regex = Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap();
+    if !uri_regex.is_match(&uri) {
+        return Err("Invalid URI detected".to_string());
+    }
+
+    for (name, value) in req.headers() {
+        let header_name_regex = Regex::new(r"^[a-zA-Z0-9\-]+$").unwrap();
+        if !header_name_regex.is_match(name.as_str()) {
+            return Err(format!("Invalid header name detected: {}", name));
+        }
+
+        let header_value_regex = Regex::new(r"^[\x20-\x7E]+$").unwrap();
+        if !header_value_regex.is_match(value.to_str().unwrap_or_default()) {
+            return Err(format!("Invalid header value detected: {:?}", value));
+        }
+    }
+
+    // If body validation is needed, you can add it here
+
+    Ok(())
 }
