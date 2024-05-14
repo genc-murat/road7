@@ -17,6 +17,8 @@ use rand::{Rng, thread_rng};
 use tracing_appender::non_blocking;
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
+use http::header::{HeaderMap, HeaderName};
+use std::borrow::Cow;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -870,35 +872,24 @@ fn apply_response_transforms(resp: &mut Response<Body>, transforms: &[Transform]
     apply_header_transforms(headers, transforms);
 }
 
-fn apply_header_transforms(
-    headers: &mut http::HeaderMap,
-    transforms: &[Transform],
-) {
+fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
     for transform in transforms {
         match transform.operation.as_str() {
             "Set" => {
-                if let Ok(header_name) = transform.name.parse::<http::header::HeaderName>()
-                {
-                    let header_value = match transform.value.as_ref() {
-                        Some(value) => {
-                            HeaderValue::from_str(value).unwrap_or_else(|_| {
-                                HeaderValue::from_static("")
-                            })
-                        }
-                        None => HeaderValue::from_static(""),
-                    };
-                    headers.insert(header_name, header_value);
+                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
+                    let header_value = transform.value
+                        .as_deref()
+                        .map_or(Cow::Borrowed(""), Cow::from);
+                    headers.insert(header_name, HeaderValue::from_str(&header_value).unwrap_or_else(|_| HeaderValue::from_static("")));
                 }
             }
             "Remove" => {
-                if let Ok(header_name) = transform.name.parse::<http::header::HeaderName>()
-                {
+                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
                     headers.remove(header_name);
                 }
             }
             "Append" => {
-                if let Ok(header_name) = transform.name.parse::<http::header::HeaderName>()
-                {
+                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
                     if let Some(current_value) = headers.get(&header_name).cloned() {
                         let new_value = format!(
                             "{}{}",
@@ -909,10 +900,9 @@ fn apply_header_transforms(
                             headers.insert(header_name, new_header_value);
                         }
                     } else {
-                        let header_value = HeaderValue::from_str(
-                            &transform.value.as_ref().unwrap_or(&"".to_string()),
-                        )
-                        .unwrap_or_else(|_| HeaderValue::from_static(""));
+                        let header_value = transform.value
+                            .as_deref()
+                            .map_or(HeaderValue::from_static(""), |v| HeaderValue::from_str(v).unwrap_or_else(|_| HeaderValue::from_static("")));
                         headers.insert(header_name, header_value);
                     }
                 }
@@ -921,7 +911,6 @@ fn apply_header_transforms(
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() {
