@@ -2,6 +2,7 @@ use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{HeaderValue, HOST, USER_AGENT};
 use hyper::client::HttpConnector;
+use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
@@ -473,8 +474,8 @@ struct ProxyState {
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
-    
-    let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size)); // Add this line
+
+    let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size));
 
     let retry_config = Arc::new(config.retries);
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
@@ -489,9 +490,13 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         http_connector.set_send_buffer_size(Some(send_buffer_size));
     }
 
-    let client = Client::builder()
+    // Create an HTTPS connector using hyper_tls
+    let https_connector = HttpsConnector::new();
+
+    // Build the client using the HTTPS connector
+    let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
-        .build::<_, hyper::Body>(http_connector);
+        .build(https_connector);
 
     let initial_target_map = build_target_map(&config.targets);
 
@@ -509,7 +514,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         circuit_breakers: DashMap::new(),
         rate_limiters: DashMap::new(),
         caches,
-        concurrency_limiter: concurrency_limiter.clone(), // Add this line
+        concurrency_limiter: concurrency_limiter.clone(),
     });
 
     let make_svc = make_service_fn(move |_| {
@@ -534,7 +539,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     });
 
     let server = Server::bind(&addr).serve(make_svc);
-    info!("Proxy is listening on http://{}", addr);
+    info!("Proxy is listening on {}", addr);
     let graceful = server.with_graceful_shutdown(shutdown_signal());
     graceful.await.map_err(Into::into)
 }
@@ -587,15 +592,18 @@ fn build_target_map(
     map
 }
 
-async fn proxy_request(
+async fn proxy_request<C>(
     original_req: Request<Body>,
     proxy_state: Arc<ProxyState>,
     default_retry_config: Arc<RetryConfig>,
     default_circuit_breaker_config: Arc<CircuitBreakerConfig>,
     default_rate_limiter_config: Arc<Option<RateLimiterConfig>>,
     default_timeout_seconds: u64,
-    client: Client<HttpConnector>,
-) -> Result<Response<Body>, hyper::Error> {
+    client: Client<C>,
+) -> Result<Response<Body>, hyper::Error>
+where
+    C: hyper::client::connect::Connect + Clone + Send + Sync + 'static,
+{
     // Acquire a permit from the semaphore
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
@@ -848,6 +856,7 @@ async fn proxy_request(
     }
     Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Maximum retries exceeded")).unwrap())
 }
+
 
 
 fn rebuild_request(
