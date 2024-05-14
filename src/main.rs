@@ -37,11 +37,17 @@ fn default_timeout_seconds() -> u64 {
     30 // Default timeout of 30 seconds
 }
 
+fn default_pool_size() -> usize {
+    10 // Default pool size of 10
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ServerConfig {
     host: String,
     port: u16,
     max_logging_level: String,
+    #[serde(default = "default_pool_size")]
+    pool_size: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -472,7 +478,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     // Client with connection pooling
     let client = Client::builder()
-        .pool_max_idle_per_host(10) // Increase the pool size as per your requirements
+        .pool_max_idle_per_host(config.server.pool_size)
         .build_http();
 
     let initial_target_map = build_target_map(&config.targets);
