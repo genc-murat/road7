@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber;
 use std::convert::Infallible;
 use tokio::signal;
 use std::time::Instant;
@@ -917,8 +918,13 @@ fn apply_header_transforms(
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
+    // Initialize the logger
+    tracing_subscriber::fmt()
+    .with_max_level(tracing::Level::DEBUG)
+    .with_target(false)
+    .init();
     info!("Starting proxy...");
+
     match read_config() {
         Ok(config) => {
             if let Err(e) = run_proxy(config).await {
