@@ -465,18 +465,20 @@ struct ProxyState {
     circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
     rate_limiters: DashMap<String, Arc<RwLock<RateLimiter>>>,
     caches: DashMap<String, Cache>,
+    concurrency_limiter: Arc<Semaphore>, 
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
+    
+    let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size)); // Add this line
 
     let retry_config = Arc::new(config.retries);
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
 
-    // Client with connection pooling
     let client = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
         .build_http();
@@ -497,6 +499,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         circuit_breakers: DashMap::new(),
         rate_limiters: DashMap::new(),
         caches,
+        concurrency_limiter: concurrency_limiter.clone(), // Add this line
     });
 
     let make_svc = make_service_fn(move |_| {
@@ -525,6 +528,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let graceful = server.with_graceful_shutdown(shutdown_signal());
     graceful.await.map_err(Into::into)
 }
+
 
 async fn shutdown_signal() {
     signal::ctrl_c()
@@ -582,6 +586,9 @@ async fn proxy_request(
     default_timeout_seconds: u64,
     client: Client<HttpConnector>,
 ) -> Result<Response<Body>, hyper::Error> {
+    // Acquire a permit from the semaphore
+    let _permit = proxy_state.concurrency_limiter.acquire().await;
+
     let path = original_req.uri().path().to_string();
     info!("Handling request for path: {}", path);
 
@@ -710,7 +717,6 @@ async fn proxy_request(
                 header_key.as_deref()
             }
         };
-        
 
         if let Some(header_key) = header_key {
             if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
