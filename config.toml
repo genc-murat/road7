@@ -4,6 +4,8 @@ host = "127.0.0.1"
 port = 3000
 max_logging_level = "INFO"
 pool_size = 10
+recv_buffer_size = 8192  # Adjust the receive buffer size as needed
+send_buffer_size = 8192  # Adjust the send buffer size as needed
 
 # Default retry configuration for all targets (if not overridden per target)
 [retries]

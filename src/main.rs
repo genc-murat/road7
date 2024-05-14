@@ -48,6 +48,8 @@ struct ServerConfig {
     max_logging_level: String,
     #[serde(default = "default_pool_size")]
     pool_size: usize,
+    recv_buffer_size: Option<usize>, 
+    send_buffer_size: Option<usize>,  
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -479,9 +481,17 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
 
+    let mut http_connector = HttpConnector::new();
+    if let Some(recv_buffer_size) = config.server.recv_buffer_size {
+        http_connector.set_recv_buffer_size(Some(recv_buffer_size));
+    }
+    if let Some(send_buffer_size) = config.server.send_buffer_size {
+        http_connector.set_send_buffer_size(Some(send_buffer_size));
+    }
+
     let client = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
-        .build_http();
+        .build::<_, hyper::Body>(http_connector);
 
     let initial_target_map = build_target_map(&config.targets);
 
