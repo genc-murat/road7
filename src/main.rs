@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use rand::{Rng, thread_rng};
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
+use dashmap::DashMap;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -437,7 +438,7 @@ impl RateLimiter {
 }
 
 struct ProxyState {
-    target_map: HashMap<
+    target_map: DashMap<
         String,
         (
             String,
@@ -453,9 +454,9 @@ struct ProxyState {
             Option<LoggingConfig>,
         ),
     >,
-    circuit_breakers: RwLock<HashMap<String, RwLock<CircuitBreaker>>>,
-    rate_limiters: RwLock<HashMap<String, RwLock<RateLimiter>>>,
-    caches: RwLock<HashMap<String, Cache>>,
+    circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
+    rate_limiters: DashMap<String, Arc<RwLock<RateLimiter>>>,
+    caches: DashMap<String, Cache>,
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -474,20 +475,19 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let initial_target_map = build_target_map(&config.targets);
 
-    let caches = RwLock::new(
-        initial_target_map.iter()
-            .filter_map(|(path, (_, _, _, _, _, _, _, _, _, cache_config, _))| {
-                cache_config.as_ref().map(|config| {
-                    (path.clone(), Cache::new(config))
-                })
+    let caches = initial_target_map.iter()
+        .filter_map(|entry| {
+            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _)) = entry.pair();
+            cache_config.as_ref().map(|config| {
+                (path.clone(), Cache::new(config))
             })
-            .collect::<HashMap<_, _>>()
-    );
+        })
+        .collect::<DashMap<_, _>>();
 
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
-        circuit_breakers: RwLock::new(HashMap::new()),
-        rate_limiters: RwLock::new(HashMap::new()),
+        circuit_breakers: DashMap::new(),
+        rate_limiters: DashMap::new(),
         caches,
     });
 
@@ -527,7 +527,7 @@ async fn shutdown_signal() {
 
 fn build_target_map(
     targets: &[Target],
-) -> HashMap<
+) -> DashMap<
     String,
     (
         String,
@@ -543,7 +543,7 @@ fn build_target_map(
         Option<LoggingConfig>,
     ),
 > {
-    let mut map = HashMap::new();
+    let map = DashMap::new();
     for target in targets {
         map.insert(
             target.path.clone(),
@@ -591,9 +591,8 @@ async fn proxy_request(
     ) = {
         let target_map = &proxy_state.target_map;
         let mut target = None;
-        for (
-            p,
-            (
+        for entry in target_map.iter() {
+            let (p, (
                 url,
                 retries,
                 req_transforms,
@@ -605,9 +604,8 @@ async fn proxy_request(
                 t_timeout,
                 cache_config,
                 log_config,
-            ),
-        ) in target_map.iter()
-        {
+            )) = entry.pair();
+
             if path.starts_with(p) {
                 if let Some(header_name) = routing_header {
                     if let Some(header_value) = original_req.headers().get(header_name) {
@@ -672,8 +670,7 @@ async fn proxy_request(
 
     // Attempt to retrieve a response from the cache if caching is configured
     if let Some(cache_config) = &target_cache_config {
-        let caches = proxy_state.caches.read().await;
-        if let Some(cache) = caches.get(&cache_key) {
+        if let Some(cache) = proxy_state.caches.get(&cache_key) {
             if let Some(cached_response) = cache.get(&cache_key).await {
                 info!("Cache hit for: {}", cache_key);
                 return Ok(Response::builder().status(StatusCode::OK).body(Body::from(cached_response)).unwrap());
@@ -683,9 +680,8 @@ async fn proxy_request(
 
     // Circuit breaker handling
     let circuit_breaker_key = format!("{}:{}", target_url, "circuit_breaker");
-    let mut circuit_breakers = proxy_state.circuit_breakers.write().await;
-    let circuit_breaker_lock = circuit_breakers.entry(circuit_breaker_key.clone())
-        .or_insert_with(|| RwLock::new(CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config))));
+    let circuit_breaker_lock = proxy_state.circuit_breakers.entry(circuit_breaker_key.clone())
+        .or_insert_with(|| Arc::new(RwLock::new(CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config)))));
 
     {
         let mut circuit_breaker = circuit_breaker_lock.write().await;
@@ -711,9 +707,8 @@ async fn proxy_request(
         if let Some(header_key) = header_key {
             if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
                 let rate_limiter_key = format!("{}:{}", target_url, header_value);
-                let mut rate_limiters = proxy_state.rate_limiters.write().await;
-                let rate_limiter_lock = rate_limiters.entry(rate_limiter_key.clone())
-                    .or_insert_with(|| RwLock::new(RateLimiter::new(rate_limiter_config, Some(header_value))));
+                let rate_limiter_lock = proxy_state.rate_limiters.entry(rate_limiter_key.clone())
+                    .or_insert_with(|| Arc::new(RwLock::new(RateLimiter::new(rate_limiter_config, Some(header_value)))));
 
                 let rate_limiter = rate_limiter_lock.read().await;
                 if !rate_limiter.acquire().await {
@@ -769,8 +764,7 @@ async fn proxy_request(
                         let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
-                        let mut caches = proxy_state.caches.write().await;
-                        let cache = caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
+                        let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
                         cache.put(cache_key, response_data.to_vec()).await;
 
                         *resp.body_mut() = Body::from(response_data);
