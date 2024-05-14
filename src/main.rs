@@ -453,8 +453,8 @@ struct ProxyState {
             Option<LoggingConfig>,
         ),
     >,
-    circuit_breakers: RwLock<HashMap<String, CircuitBreaker>>,
-    rate_limiters: RwLock<HashMap<String, RateLimiter>>,
+    circuit_breakers: RwLock<HashMap<String, RwLock<CircuitBreaker>>>,
+    rate_limiters: RwLock<HashMap<String, RwLock<RateLimiter>>>,
     caches: RwLock<HashMap<String, Cache>>,
 }
 
@@ -683,12 +683,15 @@ async fn proxy_request(
     // Circuit breaker handling
     let circuit_breaker_key = format!("{}:{}", target_url, "circuit_breaker");
     let mut circuit_breakers = proxy_state.circuit_breakers.write().await;
-    let circuit_breaker = circuit_breakers.entry(circuit_breaker_key.clone())
-        .or_insert_with(|| CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config)));
+    let circuit_breaker_lock = circuit_breakers.entry(circuit_breaker_key.clone())
+        .or_insert_with(|| RwLock::new(CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config))));
 
-    if !circuit_breaker.can_attempt() {
-        error!("Circuit breaker is open for: {}", target_url);
-        return Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Circuit Breaker is Open")).unwrap());
+    {
+        let mut circuit_breaker = circuit_breaker_lock.write().await;
+        if !circuit_breaker.can_attempt() {
+            error!("Circuit breaker is open for: {}", target_url);
+            return Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Circuit Breaker is Open")).unwrap());
+        }
     }
 
     // Rate limiter handling
@@ -708,9 +711,10 @@ async fn proxy_request(
             if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
                 let rate_limiter_key = format!("{}:{}", target_url, header_value);
                 let mut rate_limiters = proxy_state.rate_limiters.write().await;
-                let rate_limiter = rate_limiters.entry(rate_limiter_key.clone())
-                    .or_insert_with(|| RateLimiter::new(rate_limiter_config, Some(header_value)));
+                let rate_limiter_lock = rate_limiters.entry(rate_limiter_key.clone())
+                    .or_insert_with(|| RwLock::new(RateLimiter::new(rate_limiter_config, Some(header_value))));
 
+                let rate_limiter = rate_limiter_lock.read().await;
                 if !rate_limiter.acquire().await {
                     error!("Rate limit exceeded for: {}", target_url);
                     return Ok(Response::builder().status(StatusCode::TOO_MANY_REQUESTS).body(Body::from("Too Many Requests: Rate limit exceeded")).unwrap());
@@ -752,6 +756,7 @@ async fn proxy_request(
                     if let Some(ref transforms) = response_transforms {
                         apply_response_transforms(&mut resp, transforms);
                     }
+                    let mut circuit_breaker = circuit_breaker_lock.write().await;
                     if circuit_breaker.state == CircuitState::HalfOpen {
                         circuit_breaker.transition_to_closed();
                     } else {
@@ -788,6 +793,7 @@ async fn proxy_request(
                     continue;
                 } else {
                     error!("Error after retries: {}", err);
+                    let mut circuit_breaker = circuit_breaker_lock.write().await;
                     circuit_breaker.record_failure();
                     return Ok(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::from(format!("Bad Gateway: {}", err))).unwrap());
                 }
@@ -795,6 +801,7 @@ async fn proxy_request(
             Err(_) => {
                 if Instant::now().duration_since(start_time) >= Duration::from_secs(target_timeout) {
                     warn!("Global timeout exceeded, no more retries");
+                    let mut circuit_breaker = circuit_breaker_lock.write().await;
                     circuit_breaker.record_failure();
                     return Ok(Response::builder().status(StatusCode::GATEWAY_TIMEOUT).body(Body::from("Gateway Timeout")).unwrap());
                 } else {
@@ -805,6 +812,7 @@ async fn proxy_request(
                         continue;
                     } else {
                         error!("Timeout after retries");
+                        let mut circuit_breaker = circuit_breaker_lock.write().await;
                         circuit_breaker.record_failure();
                         return Ok(Response::builder().status(StatusCode::GATEWAY_TIMEOUT).body(Body::from("Gateway Timeout")).unwrap());
                     }
@@ -814,6 +822,7 @@ async fn proxy_request(
     }
 
     error!("Maximum retries exceeded");
+    let mut circuit_breaker = circuit_breaker_lock.write().await;
     circuit_breaker.record_failure();
     if circuit_breaker.state == CircuitState::HalfOpen {
         circuit_breaker.transition_to_open();
