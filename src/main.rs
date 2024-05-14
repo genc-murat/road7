@@ -4,7 +4,7 @@ use hyper::header::{HeaderValue, HOST, USER_AGENT};
 use hyper::client::HttpConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
 use log::{debug, error, info, warn};
@@ -14,10 +14,7 @@ use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
 use rand::{Rng, thread_rng};
-use tokio::sync::Mutex;
-
 use lru::LruCache;
-
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -450,7 +447,6 @@ struct ProxyState {
     caches: RwLock<HashMap<String, Cache>>,
 }
 
-
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
@@ -480,8 +476,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             .collect::<HashMap<_, _>>()
     );
     
-    
-
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
         circuit_breakers: RwLock::new(HashMap::new()),
@@ -515,10 +509,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let graceful = server.with_graceful_shutdown(shutdown_signal());
     graceful.await.map_err(Into::into)
 }
-
-
-
-
 
 async fn shutdown_signal() {
     signal::ctrl_c()
@@ -564,7 +554,6 @@ fn build_target_map(
     }
     map
 }
-
 
 async fn proxy_request(
     original_req: Request<Body>,
@@ -803,8 +792,6 @@ async fn proxy_request(
     Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Maximum retries exceeded")).unwrap())
 }
 
-
-
 fn rebuild_request(
     original_req: &Request<Body>,
     target_url: &str,
@@ -956,7 +943,6 @@ async fn watch_config(
     }
 }
 
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct RetryConfig {
     strategy: String,
@@ -1023,14 +1009,11 @@ impl RetryConfig {
     }
 }
 
-
-
 /// Trait for defining different retry strategies.
 pub trait RetryStrategy: Send + Sync {
     fn delay(&mut self) -> Duration;
     fn max_attempts(&self) -> usize;
 }
-
 
 /// Fixed Interval Backoff Strategy
 pub struct FixedIntervalBackoffStrategy {
@@ -1059,7 +1042,6 @@ impl RetryStrategy for FixedIntervalBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 /// Exponential Backoff Strategy
 pub struct ExponentialBackoffStrategy {
@@ -1123,7 +1105,6 @@ impl RetryStrategy for LinearBackoffStrategy {
     }
 }
 
-
 /// Random Delay Strategy
 pub struct RandomDelayStrategy {
     min_delay: Duration,
@@ -1153,7 +1134,6 @@ impl RetryStrategy for RandomDelayStrategy {
         self.max_attempts
     }
 }
-
 
 /// Incremental Backoff Strategy
 pub struct IncrementalBackoffStrategy {
@@ -1185,7 +1165,6 @@ impl RetryStrategy for IncrementalBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 /// Fibonacci Backoff Strategy
 pub struct FibonacciBackoffStrategy {
@@ -1221,7 +1200,6 @@ impl RetryStrategy for FibonacciBackoffStrategy {
     }
 }
 
-
 /// Geometric Backoff Strategy
 pub struct GeometricBackoffStrategy {
     base_delay: Duration,
@@ -1253,7 +1231,6 @@ impl RetryStrategy for GeometricBackoffStrategy {
     }
 }
 
-
 /// Harmonic Backoff Strategy
 pub struct HarmonicBackoffStrategy {
     base_delay: Duration,
@@ -1283,7 +1260,6 @@ impl RetryStrategy for HarmonicBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 /// Jitter Backoff Strategy
 pub struct JitterBackoffStrategy {
@@ -1316,7 +1292,6 @@ impl RetryStrategy for JitterBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
@@ -1379,6 +1354,4 @@ impl Cache {
         entries.put(key.clone(), entry);
         info!("Cache updated for key: {}", key); 
     }
-    
-    
 }
