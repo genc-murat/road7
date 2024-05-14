@@ -44,6 +44,7 @@ timeout_seconds = 3
 # This target uses the default retry and circuit breaker configuration
 rate_limiter_config = { TokenBucket = { refill_rate = 2, burst_capacity = 5, header_key = "Client-ID" } }
 cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
+logging_config = { log_requests = true, log_responses = true }
 
 [[targets]]
 path = "/api/service3"

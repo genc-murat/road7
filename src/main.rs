@@ -61,6 +61,14 @@ struct Target {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     cache_config: Option<CacheConfig>,
+    #[serde(default)]
+    logging_config: Option<LoggingConfig>, // Optional logging configuration
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct LoggingConfig {
+    log_requests: bool, // Whether to log incoming requests
+    log_responses: bool, // Whether to log outgoing responses
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -440,6 +448,7 @@ struct ProxyState {
             Option<HashMap<String, String>>,
             Option<u64>,
             Option<CacheConfig>,
+            Option<LoggingConfig>,
         ),
     >,
     circuit_breakers: RwLock<HashMap<String, CircuitBreaker>>,
@@ -464,7 +473,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let caches = RwLock::new(
         initial_target_map.iter()
-            .filter_map(|(path, (_, _, _, _, _, _, _, _, _, cache_config))| {
+            .filter_map(|(path, (_, _, _, _, _, _, _, _, _, cache_config, _))| {
                 cache_config.as_ref().map(|config| {
                     (path.clone(), Cache::new(config))
                 })
@@ -528,6 +537,7 @@ fn build_target_map(
         Option<HashMap<String, String>>,
         Option<u64>,
         Option<CacheConfig>,
+        Option<LoggingConfig>,
     ),
 > {
     let mut map = HashMap::new();
@@ -545,6 +555,7 @@ fn build_target_map(
                 target.routing_values.clone(),
                 target.timeout_seconds,
                 target.cache_config.clone(),
+                target.logging_config.clone(),
             ),
         );
     }
@@ -573,6 +584,7 @@ async fn proxy_request(
         target_rate_limiter_config,
         target_timeout,
         target_cache_config,
+        logging_config,
     ) = {
         let target_map = &proxy_state.target_map;
         let mut target = None;
@@ -589,6 +601,7 @@ async fn proxy_request(
                 routing_values,
                 t_timeout,
                 cache_config,
+                log_config,
             ),
         ) in target_map.iter()
         {
@@ -608,6 +621,7 @@ async fn proxy_request(
                                 rate_limiter_config.clone(),
                                 t_timeout.unwrap_or(default_timeout_seconds),
                                 cache_config.clone(),
+                                log_config.clone(),
                             ));
                             break;
                         }
@@ -623,6 +637,7 @@ async fn proxy_request(
                         rate_limiter_config.clone(),
                         t_timeout.unwrap_or(default_timeout_seconds),
                         cache_config.clone(),
+                        log_config.clone(),
                     ));
                     break;
                 }
@@ -641,6 +656,13 @@ async fn proxy_request(
             }
         }
     };
+
+    // Log incoming request if logging is enabled
+    if let Some(config) = &logging_config {
+        if config.log_requests {
+            info!("Incoming request: {:?}", original_req);
+        }
+    }
 
     // Create a unique cache key based on the request and target URL
     let cache_key = create_cache_key(&target_url, &original_req);
@@ -744,6 +766,13 @@ async fn proxy_request(
                         cache.put(cache_key, response_data.to_vec()).await;
 
                         *resp.body_mut() = Body::from(response_data);
+                    }
+
+                    // Log outgoing response if logging is enabled
+                    if let Some(config) = &logging_config {
+                        if config.log_responses {
+                            info!("Outgoing response: {:?}", resp);
+                        }
                     }
 
                     return Ok(resp);
@@ -886,11 +915,10 @@ fn apply_header_transforms(
     }
 }
 
-
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
+    info!("Starting proxy...");
     match read_config() {
         Ok(config) => {
             if let Err(e) = run_proxy(config).await {
