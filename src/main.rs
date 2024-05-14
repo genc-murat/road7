@@ -518,7 +518,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     graceful.await.map_err(Into::into)
 }
 
-
 async fn shutdown_signal() {
     signal::ctrl_c()
         .await
@@ -959,7 +958,6 @@ async fn main() {
         error!("Error running proxy: {}", e);
     }
 }
-
 
 fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
