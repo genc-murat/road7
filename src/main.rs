@@ -14,6 +14,7 @@ use std::time::Instant;
 use std::net::SocketAddr;
 use rand::{Rng, thread_rng};
 use lru::LruCache;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -57,9 +58,9 @@ struct Target {
     #[serde(default)]
     routing_values: Option<HashMap<String, String>>,
     #[serde(default)]
-    timeout_seconds: Option<u64>, 
+    timeout_seconds: Option<u64>,
     #[serde(default)]
-    cache_config: Option<CacheConfig>, 
+    cache_config: Option<CacheConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -186,29 +187,29 @@ enum CircuitState {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 enum RateLimiterConfig {
     TokenBucket {
-        refill_rate: u64, 
+        refill_rate: u64,
         burst_capacity: u64,
-        header_key: Option<String>, 
+        header_key: Option<String>,
     },
     LeakyBucket {
-        leak_rate: u64, 
+        leak_rate: u64,
         bucket_size: u64,
-        header_key: Option<String>, 
+        header_key: Option<String>,
     },
     FixedWindow {
-        rate: u64, 
+        rate: u64,
         window_seconds: u64,
-        header_key: Option<String>, 
+        header_key: Option<String>,
     },
     SlidingLog {
-        rate: u64, 
+        rate: u64,
         window_seconds: u64,
-        header_key: Option<String>, 
+        header_key: Option<String>,
     },
     SlidingWindow {
-        rate: u64, 
+        rate: u64,
         window_seconds: u64,
-        header_key: Option<String>, 
+        header_key: Option<String>,
     },
 }
 
@@ -224,7 +225,7 @@ impl Default for RateLimiterConfig {
 
 #[derive(Debug)]
 enum RateLimiter {
-    TokenBucket(Arc<Semaphore>, u64, String), 
+    TokenBucket(Arc<Semaphore>, u64, String),
     LeakyBucket(RwLock<LeakyBucketState>, String),
     FixedWindow(RwLock<FixedWindowState>, String),
     SlidingLog(RwLock<SlidingLogState>, String),
@@ -347,7 +348,7 @@ impl RateLimiter {
         match self {
             RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
                 if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    let permit = Arc::new(permit); 
+                    let permit = Arc::new(permit);
                     let refill_rate = *refill_rate;
                     tokio::spawn(async move {
                         let delay = Duration::from_secs(1) / refill_rate as u32;
@@ -436,9 +437,9 @@ struct ProxyState {
             Option<CircuitBreakerConfig>,
             Option<RateLimiterConfig>,
             Option<String>,
-            Option<HashMap<String, String>>, 
-            Option<u64>, 
-            Option<CacheConfig>, 
+            Option<HashMap<String, String>>,
+            Option<u64>,
+            Option<CacheConfig>,
         ),
     >,
     circuit_breakers: RwLock<HashMap<String, CircuitBreaker>>,
@@ -470,7 +471,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             })
             .collect::<HashMap<_, _>>()
     );
-    
+
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
         circuit_breakers: RwLock::new(HashMap::new()),
@@ -526,7 +527,7 @@ fn build_target_map(
         Option<String>,
         Option<HashMap<String, String>>,
         Option<u64>,
-        Option<CacheConfig>, 
+        Option<CacheConfig>,
     ),
 > {
     let mut map = HashMap::new();
@@ -543,7 +544,7 @@ fn build_target_map(
                 target.routing_header.clone(),
                 target.routing_values.clone(),
                 target.timeout_seconds,
-                target.cache_config.clone(), 
+                target.cache_config.clone(),
             ),
         );
     }
@@ -641,9 +642,11 @@ async fn proxy_request(
         }
     };
 
+    // Create a unique cache key based on the request and target URL
+    let cache_key = create_cache_key(&target_url, &original_req);
+
     // Attempt to retrieve a response from the cache if caching is configured
     if let Some(cache_config) = &target_cache_config {
-        let cache_key = format!("{}:{}", target_url, original_req.uri().query().unwrap_or(""));
         let caches = proxy_state.caches.read().await;
         if let Some(cache) = caches.get(&cache_key) {
             if let Some(cached_response) = cache.get(&cache_key).await {
@@ -733,7 +736,6 @@ async fn proxy_request(
 
                     // Cache the response if caching is configured
                     if let Some(cache_config) = &target_cache_config {
-                        let cache_key = format!("{}:{}", target_url, original_req.uri().query().unwrap_or(""));
                         let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
@@ -884,6 +886,8 @@ fn apply_header_transforms(
     }
 }
 
+
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -920,52 +924,52 @@ impl RetryConfig {
             "ExponentialBackoff" => Box::new(ExponentialBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.factor.unwrap_or(2.0),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "LinearBackoff" => Box::new(LinearBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds)),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "FixedInterval" => Box::new(FixedIntervalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "RandomDelay" => Box::new(RandomDelayStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds * 2)),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "IncrementalBackoff" => Box::new(IncrementalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 Duration::from_secs(self.step_delay_seconds.unwrap_or(1)),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "FibonacciBackoff" => Box::new(FibonacciBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "GeometricBackoff" => Box::new(GeometricBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.factor.unwrap_or(2.0),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "HarmonicBackoff" => Box::new(HarmonicBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, 
+                self.max_attempts,
             )),
             "JitterBackoff" => Box::new(JitterBackoffStrategy::new(
                 Box::new(ExponentialBackoffStrategy::new(
                     Duration::from_secs(self.base_delay_seconds),
                     self.factor.unwrap_or(2.0),
-                    self.max_attempts 
+                    self.max_attempts
                 )),
-                0.5, 
-                self.max_attempts, 
+                0.5,
+                self.max_attempts,
             )),
             _ => Box::new(FixedIntervalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts, 
+                self.max_attempts,
             )),
         }
     }
@@ -999,7 +1003,7 @@ impl RetryStrategy for FixedIntervalBackoffStrategy {
         // Always returns the same delay, does not change with attempts
         self.base_delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1030,7 +1034,7 @@ impl RetryStrategy for ExponentialBackoffStrategy {
         self.current_attempt += 1;
         delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1061,7 +1065,7 @@ impl RetryStrategy for LinearBackoffStrategy {
         self.current_attempt += 1;
         delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1091,7 +1095,7 @@ impl RetryStrategy for RandomDelayStrategy {
         let nanos = rng.gen_range(0..1_000_000_000);
         Duration::new(secs, nanos as u32)
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1122,7 +1126,7 @@ impl RetryStrategy for IncrementalBackoffStrategy {
         self.current_attempt += 1;
         delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1153,10 +1157,10 @@ impl RetryStrategy for FibonacciBackoffStrategy {
         let new_next = self.current + self.next;
         self.current = self.next;
         self.next = new_next;
-        
+
         Duration::from_secs(delay_seconds)
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1187,7 +1191,7 @@ impl RetryStrategy for GeometricBackoffStrategy {
         self.current_attempt += 1;
         delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1217,7 +1221,7 @@ impl RetryStrategy for HarmonicBackoffStrategy {
         self.current_attempt += 1;
         delay
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1249,7 +1253,7 @@ impl RetryStrategy for JitterBackoffStrategy {
         let nanos = rng.gen_range(0..1_000_000_000);
         base_delay + Duration::new(secs, nanos as u32)
     }
-    
+
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -1257,10 +1261,10 @@ impl RetryStrategy for JitterBackoffStrategy {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
-    ttl_seconds: u64,       // Time to live: Duration in seconds that the cache is valid
-    max_size: usize,        // Maximum size of the cache (number of entries)
+    ttl_seconds: u64, // Time to live: Duration in seconds that the cache is valid
+    max_size: usize, // Maximum size of the cache (number of entries)
     #[serde(default = "default_serialize")]
-    serialize: bool,        // Whether to serialize data in the cache
+    serialize: bool, // Whether to serialize data in the cache
 }
 
 fn default_serialize() -> bool {
@@ -1314,6 +1318,17 @@ impl Cache {
             expires_at: Instant::now() + self.ttl,
         };
         entries.put(key.clone(), entry);
-        info!("Cache updated for key: {}", key); 
+        info!("Cache updated for key: {}", key);
     }
+}
+
+fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target_url.hash(&mut hasher);
+    req.uri().to_string().hash(&mut hasher);
+    req.headers().iter().for_each(|(key, value)| {
+        key.hash(&mut hasher);
+        value.hash(&mut hasher);
+    });
+    format!("{:x}", hasher.finish())
 }
