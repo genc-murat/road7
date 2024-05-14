@@ -467,9 +467,10 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
 
+    // Client with connection pooling
     let client = Client::builder()
-        .pool_max_idle_per_host(5)
-        .build_http::<Body>();
+        .pool_max_idle_per_host(10) // Increase the pool size as per your requirements
+        .build_http();
 
     let initial_target_map = build_target_map(&config.targets);
 
@@ -516,6 +517,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let graceful = server.with_graceful_shutdown(shutdown_signal());
     graceful.await.map_err(Into::into)
 }
+
 
 async fn shutdown_signal() {
     signal::ctrl_c()
