@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
 use log::{debug, error, info, warn};
 use std::convert::Infallible;
-use tokio::sync::watch;
 use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
@@ -450,10 +449,6 @@ struct ProxyState {
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
-    
-    let (target_map_sender, target_map_receiver) = watch::channel(build_target_map(&config.targets));
-
-    tokio::spawn(watch_config(target_map_sender));
 
     let retry_config = Arc::new(config.retries);
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
@@ -464,7 +459,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         .pool_max_idle_per_host(5)
         .build_http::<Body>();
 
-    let initial_target_map = target_map_receiver.borrow().clone();
+    let initial_target_map = build_target_map(&config.targets);
 
     let caches = RwLock::new(
         initial_target_map.iter()
@@ -646,7 +641,7 @@ async fn proxy_request(
         }
     };
 
-    // Attempt to retrieve a response from the cache
+    // Attempt to retrieve a response from the cache if caching is configured
     if let Some(cache_config) = &target_cache_config {
         let cache_key = format!("{}:{}", target_url, original_req.uri().query().unwrap_or(""));
         let caches = proxy_state.caches.read().await;
@@ -736,9 +731,10 @@ async fn proxy_request(
                         circuit_breaker.record_success();
                     }
 
-                    let mut body = std::mem::replace(resp.body_mut(), Body::empty());
+                    // Cache the response if caching is configured
                     if let Some(cache_config) = &target_cache_config {
                         let cache_key = format!("{}:{}", target_url, original_req.uri().query().unwrap_or(""));
+                        let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
                         let mut caches = proxy_state.caches.write().await;
@@ -907,40 +903,6 @@ fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
     settings.merge(config::File::with_name("config")).unwrap();
     settings.try_into()
-}
-
-async fn watch_config(
-    sender: watch::Sender<
-        HashMap<
-            String,
-            (
-                String,
-        Option<RetryConfig>,
-        Option<Vec<Transform>>,
-        Option<Vec<Transform>>,
-        Option<CircuitBreakerConfig>,
-        Option<RateLimiterConfig>,
-        Option<String>,
-        Option<HashMap<String, String>>,
-        Option<u64>,
-        Option<CacheConfig>,
-            ),
-        >,
-    >,
-) {
-    loop {
-        match read_config() {
-            Ok(config) => {
-                if let Err(_) = sender.send(build_target_map(&config.targets)) {
-                    error!("Failed to send config update");
-                }
-            }
-            Err(e) => {
-                error!("Failed to read config: {}", e);
-            }
-        }
-        sleep(Duration::from_secs(5)).await;
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
