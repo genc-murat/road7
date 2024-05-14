@@ -1413,7 +1413,7 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
         }
 
         let header_value_regex = Regex::new(r"^[\x20-\x7E]+$").unwrap();
-        if (!header_value_regex.is_match(value.to_str().unwrap_or_default())) {
+        if !header_value_regex.is_match(value.to_str().unwrap_or_default()) {
             return Err(format!("Invalid header value detected: {:?}", value));
         }
     }
