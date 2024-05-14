@@ -615,6 +615,15 @@ where
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
     let path = original_req.uri().path().to_string();
+
+    if path == "/health" {
+        info!("Health check request received.");
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("OK"))
+            .unwrap());
+    }
+
     info!("Handling request for path: {}", path);
 
     let (
