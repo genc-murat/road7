@@ -32,17 +32,17 @@ struct ProxyConfig {
     #[serde(default)]
     default_circuit_breaker_config: CircuitBreakerConfig,
     #[serde(default = "default_timeout_seconds")]
-    default_timeout_seconds: u64, // Default timeout in seconds for all targets
+    default_timeout_seconds: u64, 
     #[serde(default)]
-    default_rate_limiter_config: Option<RateLimiterConfig>, // Optional default rate limiter
+    default_rate_limiter_config: Option<RateLimiterConfig>, 
 }
 
 fn default_timeout_seconds() -> u64 {
-    30 // Default timeout of 30 seconds
+    30 
 }
 
 fn default_pool_size() -> usize {
-    10 // Default pool size of 10
+    10 
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -79,13 +79,13 @@ struct Target {
     #[serde(default)]
     cache_config: Option<CacheConfig>,
     #[serde(default)]
-    logging_config: Option<LoggingConfig>, // Optional logging configuration
+    logging_config: Option<LoggingConfig>, 
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct LoggingConfig {
-    log_requests: bool, // Whether to log incoming requests
-    log_responses: bool, // Whether to log outgoing responses
+    log_requests: bool, 
+    log_responses: bool, 
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -241,9 +241,9 @@ enum RateLimiterConfig {
 impl Default for RateLimiterConfig {
     fn default() -> Self {
         RateLimiterConfig::TokenBucket {
-            refill_rate: 10, // 10 requests per second
-            burst_capacity: 20, // Allow bursts of up to 20 requests
-            header_key: None, // No dynamic rate limiting by default
+            refill_rate: 10, 
+            burst_capacity: 20,
+            header_key: None,
         }
     }
 }
@@ -406,7 +406,7 @@ impl RateLimiter {
                 let mut state = state.write().await;
                 let now = Instant::now();
                 if now.duration_since(state.window_start).as_secs() >= state.window_seconds {
-                    // Reset the window
+
                     state.current_requests = 0;
                     state.window_start = now;
                 }
@@ -421,7 +421,7 @@ impl RateLimiter {
                 let mut state = state.write().await;
                 let now = Instant::now();
                 let window_start = now - Duration::from_secs(state.window_seconds);
-                // Remove requests outside the window
+
                 state.requests.retain(|&t| t >= window_start);
                 if state.requests.len() < state.rate as usize {
                     state.requests.push(now);
@@ -436,7 +436,6 @@ impl RateLimiter {
                 let window_end =
                     state.window_start + Duration::from_secs(state.window_seconds);
                 if now >= window_end {
-                    // Slide the window
                     state.window_start = now;
                     state.current_requests = 1;
                     true
@@ -493,10 +492,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         http_connector.set_send_buffer_size(Some(send_buffer_size));
     }
 
-    // Create an HTTPS connector using hyper_tls
     let https_connector = HttpsConnector::new();
 
-    // Build the client using the HTTPS connector
     let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
         .build(https_connector);
@@ -607,8 +604,7 @@ async fn proxy_request<C>(
 where
     C: hyper::client::connect::Connect + Clone + Send + Sync + 'static,
 {
-    // Validate the incoming request
-    if let Err(validation_error) = validate_request(&mut original_req).await { // Pass mutable reference
+    if let Err(validation_error) = validate_request(&mut original_req).await {
         error!("Request validation failed: {}", validation_error);
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -616,7 +612,6 @@ where
             .unwrap());
     }
 
-    // Acquire a permit from the semaphore
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
     let path = original_req.uri().path().to_string();
@@ -703,17 +698,14 @@ where
         }
     };
 
-    // Log incoming request if logging is enabled
     if let Some(config) = &logging_config {
         if config.log_requests {
             info!("Incoming request: {:?}", original_req);
         }
     }
 
-    // Create a unique cache key based on the request and target URL
     let cache_key = create_cache_key(&target_url, &original_req);
 
-    // Attempt to retrieve a response from the cache if caching is configured
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
             if let Some(cached_response) = cache.get(&cache_key).await {
@@ -723,7 +715,6 @@ where
         }
     }
 
-    // Circuit breaker handling
     let circuit_breaker_key = format!("{}:{}", target_url, "circuit_breaker");
     let circuit_breaker_lock = proxy_state.circuit_breakers.entry(circuit_breaker_key.clone())
         .or_insert_with(|| Arc::new(RwLock::new(CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config)))));
@@ -736,7 +727,6 @@ where
         }
     }
 
-    // Rate limiter handling
     if let Some(rate_limiter_config) = target_rate_limiter_config.as_ref().or_else(|| default_rate_limiter_config.as_ref().as_ref()) {
         let header_key = match rate_limiter_config {
             RateLimiterConfig::TokenBucket { header_key, .. } |
@@ -803,7 +793,6 @@ where
                         circuit_breaker.record_success();
                     }
 
-                    // Cache the response if caching is configured
                     if let Some(cache_config) = &target_cache_config {
                         let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
@@ -814,7 +803,6 @@ where
                         *resp.body_mut() = Body::from(response_data);
                     }
 
-                    // Log outgoing response if logging is enabled
                     if let Some(config) = &logging_config {
                         if config.log_responses {
                             info!("Outgoing response: {:?}", resp);
@@ -956,7 +944,6 @@ fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
 
 #[tokio::main]
 async fn main() {
-    // Read the configuration
     let config = match read_config() {
         Ok(config) => config,
         Err(e) => {
@@ -965,7 +952,6 @@ async fn main() {
         }
     };
 
-    // Initialize the logger based on the config
     let log_level = match config.server.max_logging_level.as_str() {
         "DEBUG" => tracing::Level::DEBUG,
         "INFO" => tracing::Level::INFO,
@@ -1061,13 +1047,11 @@ impl RetryConfig {
     }
 }
 
-/// Trait for defining different retry strategies.
 pub trait RetryStrategy: Send + Sync {
     fn delay(&mut self) -> Duration;
     fn max_attempts(&self) -> usize;
 }
 
-/// Fixed Interval Backoff Strategy
 pub struct FixedIntervalBackoffStrategy {
     base_delay: Duration,
     current_attempt: usize,
@@ -1086,7 +1070,6 @@ impl FixedIntervalBackoffStrategy {
 
 impl RetryStrategy for FixedIntervalBackoffStrategy {
     fn delay(&mut self) -> Duration {
-        // Always returns the same delay, does not change with attempts
         self.base_delay
     }
 
@@ -1095,7 +1078,6 @@ impl RetryStrategy for FixedIntervalBackoffStrategy {
     }
 }
 
-/// Exponential Backoff Strategy
 pub struct ExponentialBackoffStrategy {
     base_delay: Duration,
     current_attempt: usize,
@@ -1126,7 +1108,6 @@ impl RetryStrategy for ExponentialBackoffStrategy {
     }
 }
 
-/// Linear Backoff Strategy
 pub struct LinearBackoffStrategy {
     base_delay: Duration,
     step: Duration,
@@ -1157,7 +1138,7 @@ impl RetryStrategy for LinearBackoffStrategy {
     }
 }
 
-/// Random Delay Strategy
+
 pub struct RandomDelayStrategy {
     min_delay: Duration,
     max_delay: Duration,
@@ -1187,7 +1168,7 @@ impl RetryStrategy for RandomDelayStrategy {
     }
 }
 
-/// Incremental Backoff Strategy
+
 pub struct IncrementalBackoffStrategy {
     initial_delay: Duration,
     increment: Duration,
@@ -1218,7 +1199,7 @@ impl RetryStrategy for IncrementalBackoffStrategy {
     }
 }
 
-/// Fibonacci Backoff Strategy
+
 pub struct FibonacciBackoffStrategy {
     base_delay: Duration,
     current: u64,
@@ -1252,7 +1233,7 @@ impl RetryStrategy for FibonacciBackoffStrategy {
     }
 }
 
-/// Geometric Backoff Strategy
+
 pub struct GeometricBackoffStrategy {
     base_delay: Duration,
     factor: f64,
@@ -1283,7 +1264,7 @@ impl RetryStrategy for GeometricBackoffStrategy {
     }
 }
 
-/// Harmonic Backoff Strategy
+
 pub struct HarmonicBackoffStrategy {
     base_delay: Duration,
     current_attempt: usize,
@@ -1313,7 +1294,7 @@ impl RetryStrategy for HarmonicBackoffStrategy {
     }
 }
 
-/// Jitter Backoff Strategy
+
 pub struct JitterBackoffStrategy {
     strategy: Box<dyn RetryStrategy>,
     jitter_factor: f64,
@@ -1347,10 +1328,10 @@ impl RetryStrategy for JitterBackoffStrategy {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
-    ttl_seconds: u64, // Time to live: Duration in seconds that the cache is valid
-    max_size: usize, // Maximum size of the cache (number of entries)
+    ttl_seconds: u64, 
+    max_size: usize,
     #[serde(default = "default_serialize")]
-    serialize: bool, // Whether to serialize data in the cache
+    serialize: bool, 
 }
 
 fn default_serialize() -> bool {
@@ -1437,7 +1418,6 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
         }
     }
 
-    // Extract the body for sanitization
     let body_bytes = to_bytes(req.body_mut()).await.unwrap();
     let body_content = String::from_utf8_lossy(&body_bytes);
     let sanitized_body = clean(&body_content);
