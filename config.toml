@@ -2,6 +2,7 @@
 [server]
 host = "127.0.0.1"
 port = 3000
+max_logging_level = "INFO"
 
 # Default retry configuration for all targets (if not overridden per target)
 [retries]
