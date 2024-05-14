@@ -825,6 +825,7 @@ async fn proxy_request(
     Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Maximum retries exceeded")).unwrap())
 }
 
+
 fn rebuild_request(
     original_req: &Request<Body>,
     target_url: &str,
@@ -1323,7 +1324,7 @@ fn default_serialize() -> bool {
 
 #[derive(Debug, Clone)]
 struct Cache {
-    entries: Arc<Mutex<LruCache<String, CacheEntry>>>,
+    entries: Arc<DashMap<String, CacheEntry>>,
     ttl: Duration,
     serialize: bool,
 }
@@ -1337,20 +1338,20 @@ struct CacheEntry {
 impl Cache {
     fn new(config: &CacheConfig) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(LruCache::new(config.max_size))),
+            entries: Arc::new(DashMap::new()),
             ttl: Duration::from_secs(config.ttl_seconds),
             serialize: config.serialize,
         }
     }
+
     async fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.get(key) {
+        if let Some(entry) = self.entries.get(key) {
             if entry.expires_at > Instant::now() {
                 info!("Cache hit for key: {}", key);
                 return Some(entry.response.clone());
             } else {
                 warn!("Cache entry expired for key: {}", key);
-                entries.pop(key);
+                self.entries.remove(key);
             }
         }
         info!("Cache miss for key: {}", key);
@@ -1358,7 +1359,6 @@ impl Cache {
     }
 
     async fn put(&self, key: String, response: Vec<u8>) {
-        let mut entries = self.entries.lock().await;
         let entry = CacheEntry {
             response: if self.serialize {
                 serde_json::to_vec(&response).unwrap_or_else(|_| response.clone())
@@ -1367,7 +1367,7 @@ impl Cache {
             },
             expires_at: Instant::now() + self.ttl,
         };
-        entries.put(key.clone(), entry);
+        self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
     }
 }
