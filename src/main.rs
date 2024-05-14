@@ -4,7 +4,7 @@ use hyper::header::{HeaderValue, HOST, USER_AGENT};
 use hyper::client::HttpConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore, Mutex};
+use tokio::sync::{RwLock, Semaphore};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
 use tracing::{debug, error, info, warn};
@@ -14,7 +14,7 @@ use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
 use rand::{Rng, thread_rng};
-use lru::LruCache;
+use tracing_appender::non_blocking;
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 
@@ -700,9 +700,9 @@ async fn proxy_request(
             RateLimiterConfig::SlidingLog { header_key, .. } |
             RateLimiterConfig::SlidingWindow { header_key, .. } => {
                 header_key.as_deref()
-            },
-            _ => None,
+            }
         };
+        
 
         if let Some(header_key) = header_key {
             if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
@@ -922,6 +922,7 @@ fn apply_header_transforms(
     }
 }
 
+
 #[tokio::main]
 async fn main() {
     // Read the configuration
@@ -942,9 +943,12 @@ async fn main() {
         _ => tracing::Level::INFO,
     };
 
+    let (non_blocking_writer, _guard) = non_blocking(std::io::stdout());
+
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_target(false)
+        .with_writer(non_blocking_writer)
         .init();
 
     info!("Starting proxy...");
@@ -959,6 +963,7 @@ fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     settings.merge(config::File::with_name("config")).unwrap();
     settings.try_into()
 }
+
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct RetryConfig {
