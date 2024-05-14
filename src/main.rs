@@ -38,6 +38,7 @@ fn default_timeout_seconds() -> u64 {
 struct ServerConfig {
     host: String,
     port: u16,
+    max_logging_level: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -918,24 +919,36 @@ fn apply_header_transforms(
 
 #[tokio::main]
 async fn main() {
-    // Initialize the logger
+    // Read the configuration
+    let config = match read_config() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("Failed to read config: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Initialize the logger based on the config
+    let log_level = match config.server.max_logging_level.as_str() {
+        "DEBUG" => tracing::Level::DEBUG,
+        "INFO" => tracing::Level::INFO,
+        "WARN" => tracing::Level::WARN,
+        "ERROR" => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
+
     tracing_subscriber::fmt()
-    .with_max_level(tracing::Level::DEBUG)
-    .with_target(false)
-    .init();
+        .with_max_level(log_level)
+        .with_target(false)
+        .init();
+
     info!("Starting proxy...");
 
-    match read_config() {
-        Ok(config) => {
-            if let Err(e) = run_proxy(config).await {
-                error!("Error running proxy: {}", e);
-            }
-        }
-        Err(e) => {
-            error!("Failed to read config: {}", e);
-        }
+    if let Err(e) = run_proxy(config).await {
+        error!("Error running proxy: {}", e);
     }
 }
+
 
 fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
