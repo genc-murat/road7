@@ -20,7 +20,9 @@ use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use http::header::{HeaderMap, HeaderName};
 use std::borrow::Cow;
-use regex::Regex;  // Import regex for validation
+use regex::Regex;  
+use ammonia::clean;  
+use hyper::body::to_bytes;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -594,7 +596,7 @@ fn build_target_map(
 }
 
 async fn proxy_request<C>(
-    original_req: Request<Body>,
+    mut original_req: Request<Body>,
     proxy_state: Arc<ProxyState>,
     default_retry_config: Arc<RetryConfig>,
     default_circuit_breaker_config: Arc<CircuitBreakerConfig>,
@@ -606,7 +608,7 @@ where
     C: hyper::client::connect::Connect + Clone + Send + Sync + 'static,
 {
     // Validate the incoming request
-    if let Err(validation_error) = validate_request(&original_req).await {
+    if let Err(validation_error) = validate_request(&mut original_req).await { // Pass mutable reference
         error!("Request validation failed: {}", validation_error);
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -1416,26 +1418,33 @@ fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
     format!("{:x}", hasher.finish())
 }
 
-async fn validate_request(req: &Request<Body>) -> Result<(), String> {
+async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let uri = req.uri().to_string();
     let uri_regex = Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap();
-    if !uri_regex.is_match(&uri) {
+    if (!uri_regex.is_match(&uri)) {
         return Err("Invalid URI detected".to_string());
     }
 
     for (name, value) in req.headers() {
         let header_name_regex = Regex::new(r"^[a-zA-Z0-9\-]+$").unwrap();
-        if !header_name_regex.is_match(name.as_str()) {
+        if (!header_name_regex.is_match(name.as_str())) {
             return Err(format!("Invalid header name detected: {}", name));
         }
 
         let header_value_regex = Regex::new(r"^[\x20-\x7E]+$").unwrap();
-        if !header_value_regex.is_match(value.to_str().unwrap_or_default()) {
+        if (!header_value_regex.is_match(value.to_str().unwrap_or_default())) {
             return Err(format!("Invalid header value detected: {:?}", value));
         }
     }
 
-    // If body validation is needed, you can add it here
+    // Extract the body for sanitization
+    let body_bytes = to_bytes(req.body_mut()).await.unwrap();
+    let body_content = String::from_utf8_lossy(&body_bytes);
+    let sanitized_body = clean(&body_content);
+
+    if body_content != sanitized_body {
+        return Err("HTML sanitization failed: potentially harmful content detected".to_string());
+    }
 
     Ok(())
 }
