@@ -723,6 +723,11 @@ where
                     .body(Body::from(cached_entry.response))
                     .unwrap();
                 *response.headers_mut() = cached_entry.headers;
+                if let Some(cors_headers) = cached_entry.cors_headers {
+                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, cors_headers.allow_origin);
+                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
+                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
+                }
                 return Ok(response);
             }
         }
@@ -810,7 +815,7 @@ where
                         let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
-                        let mut cache_entry = CacheEntry::from_response(&resp);
+                        let mut cache_entry = CacheEntry::from_response(&resp, &cors_config);
                         cache_entry.response = response_data.to_vec();
                         let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
                         cache.put(cache_key, cache_entry).await;
@@ -1469,21 +1474,36 @@ struct CacheEntry {
     headers: HeaderMap,
     status: StatusCode,
     expires_at: Instant,
+    cors_headers: Option<CorsHeaders>,
+}
+
+#[derive(Debug, Clone)]
+struct CorsHeaders {
+    allow_origin: HeaderValue,
+    allow_headers: HeaderValue,
+    allow_methods: HeaderValue,
 }
 
 impl CacheEntry {
-    fn from_response(response: &Response<Body>) -> Self {
+    fn from_response(response: &Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
         let headers = response.headers().clone();
         let status = response.status();
+        let cors_headers = cors_config.as_ref().map(|config| {
+            CorsHeaders {
+                allow_origin: HeaderValue::from_str(config.allow_origin.as_deref().unwrap_or("*")).unwrap(),
+                allow_headers: HeaderValue::from_str(config.allow_headers.as_deref().unwrap_or("*")).unwrap(),
+                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
+            }
+        });
         Self {
             response: Vec::new(),
             headers,
             status,
             expires_at: Instant::now(),
+            cors_headers,
         }
     }
 }
-
 impl Cache {
     fn new(config: &CacheConfig) -> Self {
         Self {
@@ -1517,6 +1537,7 @@ impl Cache {
             headers: response.headers.clone(),
             status: response.status,
             expires_at: Instant::now() + self.ttl,
+            cors_headers: response.cors_headers.clone(),
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
