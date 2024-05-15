@@ -24,6 +24,7 @@ use regex::Regex;
 use ammonia::clean;  
 use hyper::body::to_bytes;
 use uuid::Uuid;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -472,7 +473,8 @@ struct ProxyState {
     circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
     rate_limiters: DashMap<String, Arc<RwLock<RateLimiter>>>,
     caches: DashMap<String, Cache>,
-    concurrency_limiter: Arc<Semaphore>, 
+    concurrency_limiter: Arc<Semaphore>,
+    ongoing_requests: Arc<AtomicUsize>,
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -480,6 +482,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         .parse::<SocketAddr>()?;
 
     let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size));
+    let ongoing_requests = Arc::new(AtomicUsize::new(0));
 
     let retry_config = Arc::new(config.retries);
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
@@ -517,41 +520,68 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         rate_limiters: DashMap::new(),
         caches,
         concurrency_limiter: concurrency_limiter.clone(),
+        ongoing_requests: ongoing_requests.clone(),
     });
 
-    let make_svc = make_service_fn(move |_| {
+    let make_svc = {
         let proxy_state = Arc::clone(&proxy_state);
         let retry_config = Arc::clone(&retry_config);
         let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
         let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
         let client = client.clone();
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                proxy_request(
-                    req,
-                    Arc::clone(&proxy_state),
-                    Arc::clone(&retry_config),
-                    Arc::clone(&default_circuit_breaker_config),
-                    Arc::clone(&default_rate_limiter_config),
-                    default_timeout_seconds,
-                    client.clone(),
-                )
-            }))
-        }
-    });
+
+        make_service_fn(move |_| {
+            let proxy_state = Arc::clone(&proxy_state);
+            let retry_config = Arc::clone(&retry_config);
+            let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
+            let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
+            let client = client.clone();
+
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
+                    let proxy_state = Arc::clone(&proxy_state);
+                    let retry_config = Arc::clone(&retry_config);
+                    let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
+                    let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
+                    let client = client.clone();
+
+                    async move {
+                        proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
+                        let response = proxy_request(
+                            req,
+                            Arc::clone(&proxy_state),
+                            retry_config,
+                            default_circuit_breaker_config,
+                            default_rate_limiter_config,
+                            default_timeout_seconds,
+                            client,
+                        ).await;
+                        proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
+                        response
+                    }
+                }))
+            }
+        })
+    };
 
     let server = Server::bind(&addr).serve(make_svc);
     info!("Proxy is listening on {}", addr);
-    let graceful = server.with_graceful_shutdown(shutdown_signal());
+
+    let proxy_state_for_shutdown = Arc::clone(&proxy_state);
+    let graceful = server.with_graceful_shutdown(async move {
+        signal::ctrl_c().await.expect("Failed to capture CTRL+C signal");
+        info!("Shutdown signal received, completing pending requests...");
+
+        // Wait until all ongoing requests are completed
+        while proxy_state_for_shutdown.ongoing_requests.load(Ordering::SeqCst) > 0 {
+            sleep(Duration::from_millis(100)).await;
+        }
+        info!("All pending requests completed. Shutting down...");
+    });
+
     graceful.await.map_err(Into::into)
 }
 
-async fn shutdown_signal() {
-    signal::ctrl_c()
-        .await
-        .expect("Failed to capture CTRL+C signal");
-    info!("Shutdown signal received, completing pending requests...");
-}
 
 fn build_target_map(
     targets: &[Target],
