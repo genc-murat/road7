@@ -1,6 +1,8 @@
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
-use hyper::header::{HeaderValue, HOST, USER_AGENT, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY};
+use hyper::header::{
+    HeaderValue, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY, X_XSS_PROTECTION, REFERRER_POLICY, ACCESS_CONTROL_ALLOW_ORIGIN,ACCESS_CONTROL_ALLOW_HEADERS,ACCESS_CONTROL_ALLOW_METHODS,USER_AGENT,HOST
+};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
@@ -27,6 +29,8 @@ use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
 use thiserror::Error;
+
+const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -134,6 +138,9 @@ struct SecurityHeadersConfig {
     x_content_type_options: Option<String>,
     x_frame_options: Option<String>,
     content_security_policy: Option<String>,
+    x_xss_protection: Option<String>,
+    referrer_policy: Option<String>,
+    permissions_policy: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1749,6 +1756,28 @@ async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config
         }
         if let Some(value) = &config.content_security_policy {
             headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default CSP
+            let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
+        }
+        if let Some(value) = &config.x_xss_protection {
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default X-XSS-Protection
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
+        }
+        if let Some(value) = &config.referrer_policy {
+            headers.insert(REFERRER_POLICY, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default Referrer-Policy
+            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        }
+        if let Some(value) = &config.permissions_policy {
+            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default Permissions-Policy
+            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_static("geolocation=(), microphone=(), camera=()"));
         }
         info!("Applied security headers: {:?}", headers);
     }
