@@ -716,12 +716,14 @@ where
 
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
-            if let Some(cached_response) = cache.get(&cache_key).await {
+            if let Some(cached_entry) = cache.get(&cache_key).await {
                 info!(request_id = %request_id, "Cache hit for: {}", cache_key);
-                return Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(cached_response))
-                    .unwrap());
+                let mut response = Response::builder()
+                    .status(cached_entry.status)
+                    .body(Body::from(cached_entry.response))
+                    .unwrap();
+                *response.headers_mut() = cached_entry.headers;
+                return Ok(response);
             }
         }
     }
@@ -808,8 +810,10 @@ where
                         let mut body = std::mem::replace(resp.body_mut(), Body::empty());
                         let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
+                        let mut cache_entry = CacheEntry::from_response(&resp);
+                        cache_entry.response = response_data.to_vec();
                         let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
-                        cache.put(cache_key, response_data.to_vec()).await;
+                        cache.put(cache_key, cache_entry).await;
 
                         *resp.body_mut() = Body::from(response_data);
                     }
@@ -881,7 +885,6 @@ where
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
-
 
 fn find_target(
     proxy_state: &Arc<ProxyState>,
@@ -1463,7 +1466,22 @@ struct Cache {
 #[derive(Debug, Clone)]
 struct CacheEntry {
     response: Vec<u8>,
+    headers: HeaderMap,
+    status: StatusCode,
     expires_at: Instant,
+}
+
+impl CacheEntry {
+    fn from_response(response: &Response<Body>) -> Self {
+        let headers = response.headers().clone();
+        let status = response.status();
+        Self {
+            response: Vec::new(),
+            headers,
+            status,
+            expires_at: Instant::now(),
+        }
+    }
 }
 
 impl Cache {
@@ -1475,11 +1493,11 @@ impl Cache {
         }
     }
 
-    async fn get(&self, key: &str) -> Option<Vec<u8>> {
+    async fn get(&self, key: &str) -> Option<CacheEntry> {
         if let Some(entry) = self.entries.get(key) {
             if entry.expires_at > Instant::now() {
                 info!("Cache hit for key: {}", key);
-                return Some(entry.response.clone());
+                return Some(entry.clone());
             } else {
                 warn!("Cache entry expired for key: {}", key);
                 self.entries.remove(key);
@@ -1489,13 +1507,15 @@ impl Cache {
         None
     }
 
-    async fn put(&self, key: String, response: Vec<u8>) {
+    async fn put(&self, key: String, response: CacheEntry) {
         let entry = CacheEntry {
             response: if self.serialize {
-                serde_json::to_vec(&response).unwrap_or_else(|_| response.clone())
+                serde_json::to_vec(&response.response).unwrap_or_else(|_| response.response.clone())
             } else {
-                response
+                response.response
             },
+            headers: response.headers.clone(),
+            status: response.status,
             expires_at: Instant::now() + self.ttl,
         };
         self.entries.insert(key.clone(), entry);
