@@ -23,6 +23,7 @@ use std::borrow::Cow;
 use regex::Regex;  
 use ammonia::clean;  
 use hyper::body::to_bytes;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -369,6 +370,7 @@ impl RateLimiter {
             }
         }
     }
+
     async fn acquire(&self) -> bool {
         match self {
             RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
@@ -544,7 +546,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     graceful.await.map_err(Into::into)
 }
 
-
 async fn shutdown_signal() {
     signal::ctrl_c()
         .await
@@ -604,12 +605,12 @@ async fn proxy_request<C>(
 where
     C: hyper::client::connect::Connect + Clone + Send + Sync + 'static,
 {
+    let request_id = Uuid::new_v4();
+    info!(request_id = %request_id, "Received request: {:?}", original_req);
+
     if let Err(validation_error) = validate_request(&mut original_req).await {
-        error!("Request validation failed: {}", validation_error);
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Body::from(validation_error))
-            .unwrap());
+        error!(request_id = %request_id, "Request validation failed: {}", validation_error);
+        return Ok(ProxyError::BadRequest(validation_error).into());
     }
 
     let _permit = proxy_state.concurrency_limiter.acquire().await;
@@ -617,14 +618,14 @@ where
     let path = original_req.uri().path().to_string();
 
     if path == "/health" {
-        info!("Health check request received.");
+        info!(request_id = %request_id, "Health check request received.");
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("OK"))
             .unwrap());
     }
 
-    info!("Handling request for path: {}", path);
+    info!(request_id = %request_id, "Handling request for path: {}", path);
 
     let (
         target_url,
@@ -637,79 +638,17 @@ where
         target_timeout,
         target_cache_config,
         logging_config,
-    ) = {
-        let target_map = &proxy_state.target_map;
-        let mut target = None;
-        for entry in target_map.iter() {
-            let (p, (
-                url,
-                retries,
-                req_transforms,
-                resp_transforms,
-                cb_config,
-                rate_limiter_config,
-                routing_header,
-                routing_values,
-                t_timeout,
-                cache_config,
-                log_config,
-            )) = entry.pair();
-
-            if path.starts_with(p) {
-                if let Some(header_name) = routing_header {
-                    if let Some(header_value) = original_req.headers().get(header_name) {
-                        if let Some(target_url) = routing_values.as_ref().and_then(|values| {
-                            values.get(header_value.to_str().unwrap_or_default())
-                        }) {
-                            target = Some((
-                                target_url.clone(),
-                                p.len(),
-                                retries.as_ref().unwrap_or(&*default_retry_config).to_strategy(),
-                                req_transforms.clone(),
-                                resp_transforms.clone(),
-                                cb_config.clone(),
-                                rate_limiter_config.clone(),
-                                t_timeout.unwrap_or(default_timeout_seconds),
-                                cache_config.clone(),
-                                log_config.clone(),
-                            ));
-                            break;
-                        }
-                    }
-                } else {
-                    target = Some((
-                        url.clone(),
-                        p.len(),
-                        retries.as_ref().unwrap_or(&*default_retry_config).to_strategy(),
-                        req_transforms.clone(),
-                        resp_transforms.clone(),
-                        cb_config.clone(),
-                        rate_limiter_config.clone(),
-                        t_timeout.unwrap_or(default_timeout_seconds),
-                        cache_config.clone(),
-                        log_config.clone(),
-                    ));
-                    break;
-                }
-            }
-        }
-        match target {
-            Some(t) => t,
-            None => {
-                error!("No target found for path: {}", path);
-                return Ok(
-                    Response::builder()
-                        .status(StatusCode::NOT_FOUND)
-                        .body(Body::from("404 Not Found"))
-                        .unwrap(),
-                );
-            }
+    ) = match find_target(&proxy_state, &path, &original_req, &default_retry_config, default_timeout_seconds) {
+        Some(t) => t,
+        None => {
+            error!(request_id = %request_id, "No target found for path: {}", path);
+            return Ok(ProxyError::NotFound("No target found for the given path".to_string()).into());
         }
     };
 
     if let Some(config) = &logging_config {
         if config.log_requests {
-            info!("Incoming request: {:?}", original_req);
+            info!(request_id = %request_id, "Incoming request: {:?}", original_req);
         }
     }
 
@@ -718,8 +657,11 @@ where
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
             if let Some(cached_response) = cache.get(&cache_key).await {
-                info!("Cache hit for: {}", cache_key);
-                return Ok(Response::builder().status(StatusCode::OK).body(Body::from(cached_response)).unwrap());
+                info!(request_id = %request_id, "Cache hit for: {}", cache_key);
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(cached_response))
+                    .unwrap());
             }
         }
     }
@@ -731,8 +673,8 @@ where
     {
         let mut circuit_breaker = circuit_breaker_lock.write().await;
         if !circuit_breaker.can_attempt() {
-            error!("Circuit breaker is open for: {}", target_url);
-            return Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Circuit Breaker is Open")).unwrap());
+            error!(request_id = %request_id, "Circuit breaker is open for: {}", target_url);
+            return Ok(ProxyError::CircuitBreakerOpen.into());
         }
     }
 
@@ -755,8 +697,8 @@ where
 
                 let rate_limiter = rate_limiter_lock.read().await;
                 if !rate_limiter.acquire().await {
-                    error!("Rate limit exceeded for: {}", target_url);
-                    return Ok(Response::builder().status(StatusCode::TOO_MANY_REQUESTS).body(Body::from("Too Many Requests: Rate limit exceeded")).unwrap());
+                    error!(request_id = %request_id, "Rate limit exceeded for: {}", target_url);
+                    return Ok(ProxyError::RateLimitExceeded.into());
                 }
             }
         }
@@ -785,7 +727,7 @@ where
         match timeout(Duration::from_secs(target_timeout), response_future).await {
             Ok(Ok(mut resp)) => {
                 if retry_statuses.contains(&resp.status()) {
-                    warn!("Received {} status, retrying request...", resp.status());
+                    warn!(request_id = %request_id, "Received {} status, retrying request...", resp.status());
                     retries += 1;
                     if retries < max_attempts {
                         sleep(retry_strategy.delay()).await;
@@ -814,7 +756,7 @@ where
 
                     if let Some(config) = &logging_config {
                         if config.log_responses {
-                            info!("Outgoing response: {:?}", resp);
+                            info!(request_id = %request_id, "Outgoing response: {:?}", resp);
                         }
                     }
 
@@ -822,48 +764,124 @@ where
                 }
             }
             Ok(Err(err)) => {
-                warn!("Request failed: {}, retrying...", err);
+                warn!(request_id = %request_id, "Request failed: {}, retrying...", err);
                 retries += 1;
                 if retries < max_attempts {
                     sleep(retry_strategy.delay()).await;
                     continue;
                 } else {
-                    error!("Error after retries: {}", err);
+                    error!(request_id = %request_id, "Error after retries: {}", err);
                     let mut circuit_breaker = circuit_breaker_lock.write().await;
                     circuit_breaker.record_failure();
-                    return Ok(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::from(format!("Bad Gateway: {}", err))).unwrap());
+                    return Ok(ProxyError::InternalServerError(err.to_string()).into());
                 }
             }
             Err(_) => {
                 if Instant::now().duration_since(start_time) >= Duration::from_secs(target_timeout) {
-                    warn!("Global timeout exceeded, no more retries");
+                    warn!(request_id = %request_id, "Global timeout exceeded, no more retries");
                     let mut circuit_breaker = circuit_breaker_lock.write().await;
                     circuit_breaker.record_failure();
-                    return Ok(Response::builder().status(StatusCode::GATEWAY_TIMEOUT).body(Body::from("Gateway Timeout")).unwrap());
+                    return Ok(ProxyError::Timeout.into());
                 } else {
-                    warn!("Timeout after {} seconds, retrying...", target_timeout);
+                    warn!(request_id = %request_id, "Timeout after {} seconds, retrying...", target_timeout);
                     retries += 1;
                     if retries < max_attempts {
                         sleep(retry_strategy.delay()).await;
                         continue;
                     } else {
-                        error!("Timeout after retries");
+                        error!(request_id = %request_id, "Timeout after retries");
                         let mut circuit_breaker = circuit_breaker_lock.write().await;
                         circuit_breaker.record_failure();
-                        return Ok(Response::builder().status(StatusCode::GATEWAY_TIMEOUT).body(Body::from("Gateway Timeout")).unwrap());
+                        return Ok(ProxyError::Timeout.into());
                     }
                 }
             }
         }
     }
 
-    error!("Maximum retries exceeded");
+    error!(request_id = %request_id, "Maximum retries exceeded");
     let mut circuit_breaker = circuit_breaker_lock.write().await;
     circuit_breaker.record_failure();
     if circuit_breaker.state == CircuitState::HalfOpen {
         circuit_breaker.transition_to_open();
     }
-    Ok(Response::builder().status(StatusCode::SERVICE_UNAVAILABLE).body(Body::from("Service Unavailable: Maximum retries exceeded")).unwrap())
+    Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
+}
+
+fn find_target(
+    proxy_state: &Arc<ProxyState>,
+    path: &str,
+    req: &Request<Body>,
+    default_retry_config: &Arc<RetryConfig>,
+    default_timeout_seconds: u64,
+) -> Option<(
+    String,
+    usize,
+    Box<dyn RetryStrategy>,
+    Option<Vec<Transform>>,
+    Option<Vec<Transform>>,
+    Option<CircuitBreakerConfig>,
+    Option<RateLimiterConfig>,
+    u64,
+    Option<CacheConfig>,
+    Option<LoggingConfig>,
+)> {
+    let target_map = &proxy_state.target_map;
+    let mut target = None;
+    for entry in target_map.iter() {
+        let (p, (
+            url,
+            retries,
+            req_transforms,
+            resp_transforms,
+            cb_config,
+            rate_limiter_config,
+            routing_header,
+            routing_values,
+            t_timeout,
+            cache_config,
+            log_config,
+        )) = entry.pair();
+
+        if path.starts_with(p) {
+            if let Some(header_name) = routing_header {
+                if let Some(header_value) = req.headers().get(header_name) {
+                    if let Some(target_url) = routing_values.as_ref().and_then(|values| {
+                        values.get(header_value.to_str().unwrap_or_default())
+                    }) {
+                        target = Some((
+                            target_url.clone(),
+                            p.len(),
+                            retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
+                            req_transforms.clone(),
+                            resp_transforms.clone(),
+                            cb_config.clone(),
+                            rate_limiter_config.clone(),
+                            t_timeout.unwrap_or(default_timeout_seconds),
+                            cache_config.clone(),
+                            log_config.clone(),
+                        ));
+                        break;
+                    }
+                }
+            } else {
+                target = Some((
+                    url.clone(),
+                    p.len(),
+                    retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
+                    req_transforms.clone(),
+                    resp_transforms.clone(),
+                    cb_config.clone(),
+                    rate_limiter_config.clone(),
+                    t_timeout.unwrap_or(default_timeout_seconds),
+                    cache_config.clone(),
+                    log_config.clone(),
+                ));
+                break;
+            }
+        }
+    }
+    target
 }
 
 
@@ -1436,4 +1454,64 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum ProxyError {
+    CircuitBreakerOpen,
+    RateLimitExceeded,
+    Timeout,
+    InternalServerError(String),
+    BadRequest(String),
+    NotFound(String),
+    ServiceUnavailable(String),
+}
+
+impl std::fmt::Display for ProxyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ProxyError::CircuitBreakerOpen => write!(f, "Service Unavailable: Circuit Breaker is Open"),
+            ProxyError::RateLimitExceeded => write!(f, "Too Many Requests: Rate limit exceeded"),
+            ProxyError::Timeout => write!(f, "Gateway Timeout"),
+            ProxyError::InternalServerError(msg) => write!(f, "Internal Server Error: {}", msg),
+            ProxyError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
+            ProxyError::NotFound(msg) => write!(f, "Not Found: {}", msg),
+            ProxyError::ServiceUnavailable(msg) => write!(f, "Service Unavailable: {}", msg),
+        }
+    }
+}
+
+impl From<ProxyError> for Response<Body> {
+    fn from(error: ProxyError) -> Self {
+        match error {
+            ProxyError::CircuitBreakerOpen => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::RateLimitExceeded => Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::Timeout => Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::InternalServerError(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::BadRequest(_) => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::NotFound(_) => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::ServiceUnavailable(_) => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+        }
+    }
 }

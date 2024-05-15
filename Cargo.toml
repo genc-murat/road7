@@ -24,3 +24,4 @@ lru = "0.7"
 dashmap = "5.0"
 regex = "1"
 ammonia = "3.0"
+uuid = { version = "1.0", features = ["v4"] }
