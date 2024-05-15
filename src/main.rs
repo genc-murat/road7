@@ -1,6 +1,6 @@
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
-use hyper::header::{HeaderValue, HOST, USER_AGENT};
+use hyper::header::{HeaderValue, HOST, USER_AGENT, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
@@ -94,7 +94,20 @@ struct Target {
     #[serde(default)]
     cache_config: Option<CacheConfig>,
     #[serde(default)]
-    logging_config: Option<LoggingConfig>, 
+    logging_config: Option<LoggingConfig>,
+    #[serde(default)]
+    cors_config: Option<CorsConfig>, 
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct CorsConfig {
+    enabled: bool,
+    #[serde(rename = "Access-Control-Allow-Origin")]
+    allow_origin: Option<String>,
+    #[serde(rename = "Access-Control-Allow-Headers")]
+    allow_headers: Option<String>,
+    #[serde(rename = "Access-Control-Allow-Methods")]
+    allow_methods: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -481,6 +494,7 @@ struct ProxyState {
             Option<u64>,
             Option<CacheConfig>,
             Option<LoggingConfig>,
+            Option<CorsConfig>,
         ),
     >,
     circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
@@ -520,7 +534,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let caches = initial_target_map.iter()
         .filter_map(|entry| {
-            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _)) = entry.pair();
+            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _, _)) = entry.pair();
             cache_config.as_ref().map(|config| {
                 (path.clone(), Cache::new(config))
             })
@@ -612,6 +626,7 @@ fn build_target_map(
         Option<u64>,
         Option<CacheConfig>,
         Option<LoggingConfig>,
+        Option<CorsConfig>,
     ),
 > {
     let map = DashMap::new();
@@ -630,6 +645,7 @@ fn build_target_map(
                 target.timeout_seconds,
                 target.cache_config.clone(),
                 target.logging_config.clone(),
+                target.cors_config.clone(),
             ),
         );
     }
@@ -681,6 +697,7 @@ where
         target_timeout,
         target_cache_config,
         logging_config,
+        cors_config,
     ) = match find_target(&proxy_state, &path, &original_req, &default_retry_config, default_timeout_seconds) {
         Some(t) => t,
         None => {
@@ -803,6 +820,20 @@ where
                         }
                     }
 
+                    if let Some(cors_config) = &cors_config {
+                        if cors_config.enabled {
+                            if let Some(allow_origin) = &cors_config.allow_origin {
+                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_str(allow_origin).unwrap());
+                            }
+                            if let Some(allow_headers) = &cors_config.allow_headers {
+                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_str(allow_headers).unwrap());
+                            }
+                            if let Some(allow_methods) = &cors_config.allow_methods {
+                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_str(allow_methods).unwrap());
+                            }
+                        }
+                    }
+
                     return Ok(resp);
                 }
             }
@@ -869,6 +900,7 @@ fn find_target(
     u64,
     Option<CacheConfig>,
     Option<LoggingConfig>,
+    Option<CorsConfig>,
 )> {
     let target_map = &proxy_state.target_map;
     let mut target = None;
@@ -885,6 +917,7 @@ fn find_target(
             t_timeout,
             cache_config,
             log_config,
+            cors_config,
         )) = entry.pair();
 
         if path.starts_with(p) {
@@ -904,6 +937,7 @@ fn find_target(
                             t_timeout.unwrap_or(default_timeout_seconds),
                             cache_config.clone(),
                             log_config.clone(),
+                            cors_config.clone(),
                         ));
                         break;
                     }
@@ -920,6 +954,7 @@ fn find_target(
                     t_timeout.unwrap_or(default_timeout_seconds),
                     cache_config.clone(),
                     log_config.clone(),
+                    cors_config.clone(),
                 ));
                 break;
             }
