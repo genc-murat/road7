@@ -25,10 +25,13 @@ use ammonia::clean;
 use hyper::body::to_bytes;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::runtime::Builder;
+
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
     server: ServerConfig,
+    runtime: RuntimeConfig,
     targets: Vec<Target>,
     retries: RetryConfig,
     #[serde(default)]
@@ -56,6 +59,16 @@ struct ServerConfig {
     pool_size: usize,
     recv_buffer_size: Option<usize>, 
     send_buffer_size: Option<usize>,  
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RuntimeConfig {
+    #[serde(default = "default_worker_threads")]
+    worker_threads: usize,
+}
+
+fn default_worker_threads() -> usize {
+    1
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -999,8 +1012,7 @@ fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let config = match read_config() {
         Ok(config) => config,
         Err(e) => {
@@ -1027,9 +1039,19 @@ async fn main() {
 
     info!("Starting proxy...");
 
-    if let Err(e) = run_proxy(config).await {
-        error!("Error running proxy: {}", e);
-    }
+    let worker_threads = config.runtime.worker_threads;
+
+    let rt = Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        if let Err(e) = run_proxy(config).await {
+            error!("Error running proxy: {}", e);
+        }
+    });
 }
 
 fn read_config() -> Result<ProxyConfig, config::ConfigError> {
