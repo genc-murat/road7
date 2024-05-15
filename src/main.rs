@@ -41,7 +41,7 @@ struct ProxyConfig {
     #[serde(default)]
     default_rate_limiter_config: Option<RateLimiterConfig>,
     #[serde(default)]
-    security_headers_config: Option<SecurityHeadersConfig>, // Added security headers config
+    security_headers_config: Option<SecurityHeadersConfig>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -1633,8 +1633,8 @@ impl Cache {
             status: response.status,
             expires_at: Instant::now() + self.ttl,
             cors_headers: response.cors_headers.clone(),
-            etag: response.etag.clone(), // Include etag
-            last_modified: response.last_modified.clone(), // Include last_modified
+            etag: response.etag.clone(), 
+            last_modified: response.last_modified.clone(),
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
