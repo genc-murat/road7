@@ -997,6 +997,7 @@ dependencies = [
  "rustls 0.20.9",
  "serde 1.0.201",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-util",

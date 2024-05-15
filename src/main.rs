@@ -26,7 +26,7 @@ use hyper::body::to_bytes;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
-
+use thiserror::Error;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -851,6 +851,7 @@ where
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
 
+
 fn find_target(
     proxy_state: &Arc<ProxyState>,
     path: &str,
@@ -1508,29 +1509,22 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum ProxyError {
+    #[error("Service Unavailable: Circuit Breaker is Open")]
     CircuitBreakerOpen,
+    #[error("Too Many Requests: Rate limit exceeded")]
     RateLimitExceeded,
+    #[error("Gateway Timeout")]
     Timeout,
+    #[error("Internal Server Error: {0}")]
     InternalServerError(String),
+    #[error("Bad Request: {0}")]
     BadRequest(String),
+    #[error("Not Found: {0}")]
     NotFound(String),
+    #[error("Service Unavailable: {0}")]
     ServiceUnavailable(String),
-}
-
-impl std::fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ProxyError::CircuitBreakerOpen => write!(f, "Service Unavailable: Circuit Breaker is Open"),
-            ProxyError::RateLimitExceeded => write!(f, "Too Many Requests: Rate limit exceeded"),
-            ProxyError::Timeout => write!(f, "Gateway Timeout"),
-            ProxyError::InternalServerError(msg) => write!(f, "Internal Server Error: {}", msg),
-            ProxyError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
-            ProxyError::NotFound(msg) => write!(f, "Not Found: {}", msg),
-            ProxyError::ServiceUnavailable(msg) => write!(f, "Service Unavailable: {}", msg),
-        }
-    }
 }
 
 impl From<ProxyError> for Response<Body> {
