@@ -1,6 +1,6 @@
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
-use hyper::header::{HeaderValue, HOST, USER_AGENT, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS};
+use hyper::header::{HeaderValue, HOST, USER_AGENT, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
@@ -20,8 +20,8 @@ use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use http::header::{HeaderMap, HeaderName};
 use std::borrow::Cow;
-use regex::Regex;  
-use ammonia::clean;  
+use regex::Regex;
+use ammonia::clean;
 use hyper::body::to_bytes;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,17 +37,19 @@ struct ProxyConfig {
     #[serde(default)]
     default_circuit_breaker_config: CircuitBreakerConfig,
     #[serde(default = "default_timeout_seconds")]
-    default_timeout_seconds: u64, 
+    default_timeout_seconds: u64,
     #[serde(default)]
-    default_rate_limiter_config: Option<RateLimiterConfig>, 
+    default_rate_limiter_config: Option<RateLimiterConfig>,
+    #[serde(default)]
+    security_headers_config: Option<SecurityHeadersConfig>, // Added security headers config
 }
 
 fn default_timeout_seconds() -> u64 {
-    30 
+    30
 }
 
 fn default_pool_size() -> usize {
-    10 
+    10
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,8 +59,8 @@ struct ServerConfig {
     max_logging_level: String,
     #[serde(default = "default_pool_size")]
     pool_size: usize,
-    recv_buffer_size: Option<usize>, 
-    send_buffer_size: Option<usize>,  
+    recv_buffer_size: Option<usize>,
+    send_buffer_size: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -96,7 +98,7 @@ struct Target {
     #[serde(default)]
     logging_config: Option<LoggingConfig>,
     #[serde(default)]
-    cors_config: Option<CorsConfig>, 
+    cors_config: Option<CorsConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -112,8 +114,8 @@ struct CorsConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct LoggingConfig {
-    log_requests: bool, 
-    log_responses: bool, 
+    log_requests: bool,
+    log_responses: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -124,6 +126,14 @@ struct Transform {
     #[serde(default)]
     value: Option<String>,
     operation: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct SecurityHeadersConfig {
+    strict_transport_security: Option<String>,
+    x_content_type_options: Option<String>,
+    x_frame_options: Option<String>,
+    content_security_policy: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,7 +279,7 @@ enum RateLimiterConfig {
 impl Default for RateLimiterConfig {
     fn default() -> Self {
         RateLimiterConfig::TokenBucket {
-            refill_rate: 10, 
+            refill_rate: 10,
             burst_capacity: 20,
             header_key: None,
         }
@@ -515,6 +525,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
+    let security_headers_config = Arc::new(config.security_headers_config.clone());
 
     let mut http_connector = HttpConnector::new();
     if let Some(recv_buffer_size) = config.server.recv_buffer_size {
@@ -556,6 +567,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
         let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
         let client = client.clone();
+        let security_headers_config = Arc::clone(&security_headers_config);
 
         make_service_fn(move |_| {
             let proxy_state = Arc::clone(&proxy_state);
@@ -563,6 +575,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
             let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
             let client = client.clone();
+            let security_headers_config = Arc::clone(&security_headers_config);
 
             async move {
                 Ok::<_, Infallible>(service_fn(move |req| {
@@ -571,6 +584,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                     let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
                     let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
                     let client = client.clone();
+                    let security_headers_config = Arc::clone(&security_headers_config);
 
                     async move {
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
@@ -581,6 +595,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             default_circuit_breaker_config,
                             default_rate_limiter_config,
                             default_timeout_seconds,
+                            security_headers_config,
                             client,
                         ).await;
                         proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
@@ -608,6 +623,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
+
+
 
 
 fn build_target_map(
@@ -659,6 +676,7 @@ async fn proxy_request<C>(
     default_circuit_breaker_config: Arc<CircuitBreakerConfig>,
     default_rate_limiter_config: Arc<Option<RateLimiterConfig>>,
     default_timeout_seconds: u64,
+    security_headers_config: Arc<Option<SecurityHeadersConfig>>,
     client: Client<C>,
 ) -> Result<Response<Body>, hyper::Error>
 where
@@ -728,6 +746,7 @@ where
                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
                 }
+                apply_security_headers(response.headers_mut(), &security_headers_config).await;
                 return Ok(response);
             }
         }
@@ -843,6 +862,7 @@ where
                         }
                     }
 
+                    apply_security_headers(resp.headers_mut(), &security_headers_config).await;
                     return Ok(resp);
                 }
             }
@@ -1451,10 +1471,10 @@ impl RetryStrategy for JitterBackoffStrategy {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
-    ttl_seconds: u64, 
+    ttl_seconds: u64,
     max_size: usize,
     #[serde(default = "default_serialize")]
-    serialize: bool, 
+    serialize: bool,
 }
 
 fn default_serialize() -> bool {
@@ -1637,3 +1657,22 @@ impl From<ProxyError> for Response<Body> {
         }
     }
 }
+
+async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config: &Option<SecurityHeadersConfig>) {
+    if let Some(config) = security_headers_config.as_ref() {
+        if let Some(value) = &config.strict_transport_security {
+            headers.insert(STRICT_TRANSPORT_SECURITY, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.x_content_type_options {
+            headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.x_frame_options {
+            headers.insert(X_FRAME_OPTIONS, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.content_security_policy {
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
+        }
+        info!("Applied security headers: {:?}", headers);
+    }
+}
+
