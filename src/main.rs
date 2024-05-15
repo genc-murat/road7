@@ -734,18 +734,27 @@ where
 
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
-            if let Some(cached_entry) = cache.get(&cache_key).await {
+            if let Some(cache_entry) = cache.get(&cache_key).await {
                 info!(request_id = %request_id, "Cache hit for: {}", cache_key);
                 let mut response = Response::builder()
-                    .status(cached_entry.status)
-                    .body(Body::from(cached_entry.response))
+                    .status(cache_entry.status)
+                    .body(Body::from(cache_entry.response.clone()))
                     .unwrap();
-                *response.headers_mut() = cached_entry.headers;
-                if let Some(cors_headers) = cached_entry.cors_headers {
+                *response.headers_mut() = cache_entry.headers.clone();
+                if let Some(cors_headers) = cache_entry.cors_headers.clone() {
                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, cors_headers.allow_origin);
                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
                 }
+
+                // Add ETag and Last-Modified headers
+                if let Some(etag) = cache_entry.etag.clone() {
+                    response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
+                }
+                if let Some(last_modified) = cache_entry.last_modified.clone() {
+                    response.headers_mut().insert("Last-Modified", HeaderValue::from_str(&last_modified).unwrap());
+                }
+
                 apply_security_headers(response.headers_mut(), &security_headers_config).await;
                 return Ok(response);
             }
@@ -790,6 +799,18 @@ where
         }
     }
 
+    // Add conditional request headers
+    if let Some(cache) = proxy_state.caches.get(&cache_key) {
+        if let Some(cache_entry) = cache.get(&cache_key).await {
+            if let Some(etag) = cache_entry.etag.clone() {
+                original_req.headers_mut().insert("If-None-Match", HeaderValue::from_str(&etag).unwrap());
+            }
+            if let Some(last_modified) = cache_entry.last_modified.clone() {
+                original_req.headers_mut().insert("If-Modified-Since", HeaderValue::from_str(&last_modified).unwrap());
+            }
+        }
+    }
+
     let mut retry_strategy = retry_strategy;
     let start_time = Instant::now();
     let retry_statuses = [
@@ -830,40 +851,70 @@ where
                         circuit_breaker.record_success();
                     }
 
-                    if let Some(cache_config) = &target_cache_config {
-                        let mut body = std::mem::replace(resp.body_mut(), Body::empty());
-                        let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
+                    if resp.status() == StatusCode::NOT_MODIFIED {
+                        info!(request_id = %request_id, "Not modified response received, serving from cache");
 
-                        let mut cache_entry = CacheEntry::from_response(&resp, &cors_config);
-                        cache_entry.response = response_data.to_vec();
-                        let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
-                        cache.put(cache_key, cache_entry).await;
+                        if let Some(cache) = proxy_state.caches.get(&cache_key) {
+                            if let Some(cache_entry) = cache.get(&cache_key).await {
+                                let mut response = Response::builder()
+                                    .status(cache_entry.status)
+                                    .body(Body::from(cache_entry.response.clone()))
+                                    .unwrap();
+                                *response.headers_mut() = cache_entry.headers.clone();
+                                if let Some(cors_headers) = cache_entry.cors_headers.clone() {
+                                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, cors_headers.allow_origin);
+                                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
+                                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
+                                }
 
-                        *resp.body_mut() = Body::from(response_data);
-                    }
+                                // Add ETag and Last-Modified headers
+                                if let Some(etag) = cache_entry.etag.clone() {
+                                    response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
+                                }
+                                if let Some(last_modified) = cache_entry.last_modified.clone() {
+                                    response.headers_mut().insert("Last-Modified", HeaderValue::from_str(&last_modified).unwrap());
+                                }
 
-                    if let Some(config) = &logging_config {
-                        if config.log_responses {
-                            info!(request_id = %request_id, "Outgoing response: {:?}", resp);
-                        }
-                    }
-
-                    if let Some(cors_config) = &cors_config {
-                        if cors_config.enabled {
-                            if let Some(allow_origin) = &cors_config.allow_origin {
-                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_str(allow_origin).unwrap());
-                            }
-                            if let Some(allow_headers) = &cors_config.allow_headers {
-                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_str(allow_headers).unwrap());
-                            }
-                            if let Some(allow_methods) = &cors_config.allow_methods {
-                                resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_str(allow_methods).unwrap());
+                                apply_security_headers(response.headers_mut(), &security_headers_config).await;
+                                return Ok(response);
                             }
                         }
-                    }
+                    } else {
+                        if let Some(cache_config) = &target_cache_config {
+                            let mut body = std::mem::replace(resp.body_mut(), Body::empty());
+                            let response_data = hyper::body::to_bytes(&mut body).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
-                    apply_security_headers(resp.headers_mut(), &security_headers_config).await;
-                    return Ok(resp);
+                            let mut cache_entry = CacheEntry::from_response(&mut resp, &cors_config).await;
+                            cache_entry.response = response_data.to_vec();
+                            let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
+                            cache.put(cache_key, cache_entry).await;
+
+                            *resp.body_mut() = Body::from(response_data);
+                        }
+
+                        if let Some(config) = &logging_config {
+                            if config.log_responses {
+                                info!(request_id = %request_id, "Outgoing response: {:?}", resp);
+                            }
+                        }
+
+                        if let Some(cors_config) = &cors_config {
+                            if cors_config.enabled {
+                                if let Some(allow_origin) = &cors_config.allow_origin {
+                                    resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_str(allow_origin).unwrap());
+                                }
+                                if let Some(allow_headers) = &cors_config.allow_headers {
+                                    resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_str(allow_headers).unwrap());
+                                }
+                                if let Some(allow_methods) = &cors_config.allow_methods {
+                                    resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_str(allow_methods).unwrap());
+                                }
+                            }
+                        }
+
+                        apply_security_headers(resp.headers_mut(), &security_headers_config).await;
+                        return Ok(resp);
+                    }
                 }
             }
             Ok(Err(err)) => {
@@ -910,6 +961,8 @@ where
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
+
+
 
 fn find_target(
     proxy_state: &Arc<ProxyState>,
@@ -1495,7 +1548,10 @@ struct CacheEntry {
     status: StatusCode,
     expires_at: Instant,
     cors_headers: Option<CorsHeaders>,
+    etag: Option<String>,
+    last_modified: Option<String>, 
 }
+
 
 #[derive(Debug, Clone)]
 struct CorsHeaders {
@@ -1505,7 +1561,7 @@ struct CorsHeaders {
 }
 
 impl CacheEntry {
-    fn from_response(response: &Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
+    async fn from_response(response: &mut Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
         let headers = response.headers().clone();
         let status = response.status();
         let cors_headers = cors_config.as_ref().map(|config| {
@@ -1515,15 +1571,34 @@ impl CacheEntry {
                 allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
             }
         });
+
+        // Extract the body bytes
+        let body_bytes = hyper::body::to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
+
+        // Generate ETag
+        let etag = headers.get("ETag").map(|v| v.to_str().unwrap().to_string()).or_else(|| {
+            let hash = format!("{:x}", md5::compute(&body_bytes));
+            Some(format!("\"{}\"", hash))
+        });
+
+        // Generate Last-Modified
+        let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
+
         Self {
-            response: Vec::new(),
+            response: body_bytes.to_vec(),
             headers,
             status,
             expires_at: Instant::now(),
             cors_headers,
+            etag,
+            last_modified,
         }
     }
 }
+
+
+
+
 impl Cache {
     fn new(config: &CacheConfig) -> Self {
         Self {
@@ -1558,10 +1633,13 @@ impl Cache {
             status: response.status,
             expires_at: Instant::now() + self.ttl,
             cors_headers: response.cors_headers.clone(),
+            etag: response.etag.clone(), // Include etag
+            last_modified: response.last_modified.clone(), // Include last_modified
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
     }
+    
 }
 
 fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
