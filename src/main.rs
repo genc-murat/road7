@@ -1482,13 +1482,13 @@ fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
 async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let uri = req.uri().to_string();
     let uri_regex = Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap();
-    if (!uri_regex.is_match(&uri)) {
+    if !uri_regex.is_match(&uri) {
         return Err("Invalid URI detected".to_string());
     }
 
     for (name, value) in req.headers() {
         let header_name_regex = Regex::new(r"^[a-zA-Z0-9\-]+$").unwrap();
-        if (!header_name_regex.is_match(name.as_str())) {
+        if !header_name_regex.is_match(name.as_str()) {
             return Err(format!("Invalid header name detected: {}", name));
         }
 
