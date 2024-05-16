@@ -920,6 +920,13 @@ where
                         }
 
                         apply_security_headers(resp.headers_mut(), &security_headers_config).await;
+
+                        if let Some(config) = &logging_config {
+                            if config.log_responses {
+                                info!(request_id = %request_id, "Outgoing response (from cache): {:?}", resp);
+                            }
+                        }
+
                         return Ok(resp);
                     }
                 }
