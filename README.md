@@ -25,7 +25,7 @@ Road7 is a high-performance, feature-rich proxy server implemented in Rust. It l
 Road7 uses a configuration file (in `toml` format) to manage its settings. Below is a detailed description of each configuration section and its options.
 
 ### Example Configuration File (config.toml)
-
+```
 [server]
 host = "127.0.0.1"
 port = 8080
