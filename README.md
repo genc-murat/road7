@@ -25,7 +25,7 @@ Road7 is a high-performance, feature-rich proxy server implemented in Rust. It l
 Road7 uses a configuration file (in `toml` format) to manage its settings. Below is a detailed description of each configuration section and its options.
 
 ### Example Configuration File (config.toml)
-```
+```toml
 [server]
 host = "127.0.0.1"
 port = 8080
@@ -251,7 +251,6 @@ type = "TokenBucket"  # The type of rate limiter (e.g., TokenBucket, LeakyBucket
 refill_rate = 10  # The rate at which tokens are refilled (for TokenBucket)
 burst_capacity = 50  # The maximum burst capacity (for TokenBucket)
 
-```toml
 [targets.cache_config]
 ttl_seconds = 300  # The time-to-live for cached responses in seconds
 max_size = 1024  # The maximum size of the cache
