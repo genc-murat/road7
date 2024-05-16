@@ -26,7 +26,6 @@ Road7 uses a configuration file (in `toml` format) to manage its settings. Below
 
 ### Example Configuration File (config.toml)
 
-```toml
 [server]
 host = "127.0.0.1"
 port = 8080
