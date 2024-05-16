@@ -1556,9 +1556,8 @@ struct CacheEntry {
     expires_at: Instant,
     cors_headers: Option<CorsHeaders>,
     etag: Option<String>,
-    last_modified: Option<String>, 
+    last_modified: Option<String>,
 }
-
 
 #[derive(Debug, Clone)]
 struct CorsHeaders {
@@ -1604,15 +1603,24 @@ impl CacheEntry {
 }
 
 
-
-
 impl Cache {
     fn new(config: &CacheConfig) -> Self {
-        Self {
+        let cache = Self {
             entries: Arc::new(DashMap::new()),
             ttl: Duration::from_secs(config.ttl_seconds),
             serialize: config.serialize,
-        }
+        };
+
+        // Arka planda çalışan temizleme görevi
+        let cache_clone = cache.clone();
+        tokio::spawn(async move {
+            loop {
+                cache_clone.clean_expired_entries().await;
+                sleep(Duration::from_secs(60)).await; // 60 saniyede bir temizleme işlemi yap
+            }
+        });
+
+        cache
     }
 
     async fn get(&self, key: &str) -> Option<CacheEntry> {
@@ -1622,7 +1630,7 @@ impl Cache {
                 return Some(entry.clone());
             } else {
                 warn!("Cache entry expired for key: {}", key);
-                self.entries.remove(key);
+                self.remove_expired(key).await;
             }
         }
         info!("Cache miss for key: {}", key);
@@ -1640,14 +1648,31 @@ impl Cache {
             status: response.status,
             expires_at: Instant::now() + self.ttl,
             cors_headers: response.cors_headers.clone(),
-            etag: response.etag.clone(), 
+            etag: response.etag.clone(),
             last_modified: response.last_modified.clone(),
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
     }
-    
+
+    async fn remove_expired(&self, key: &str) {
+        self.entries.remove(key);
+        warn!("Cache entry removed for key: {}", key);
+    }
+
+    async fn clean_expired_entries(&self) {
+        let now = Instant::now();
+        let keys_to_remove: Vec<String> = self.entries.iter()
+            .filter(|entry| entry.value().expires_at <= now)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            self.remove_expired(&key).await;
+        }
+    }
 }
+
 
 fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1659,6 +1684,7 @@ fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
     });
     format!("{:x}", hasher.finish())
 }
+
 
 async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let uri = req.uri().to_string();
