@@ -6,6 +6,7 @@ use hyper::header::{
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber;
 use std::convert::Infallible;
 use tokio::signal;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use std::net::SocketAddr;
 use rand::{Rng, thread_rng};
 use tracing_appender::non_blocking;
@@ -521,34 +522,64 @@ struct ProxyState {
     ongoing_requests: Arc<AtomicUsize>,
 }
 
-async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("{}:{}", config.server.host, config.server.port)
+impl ProxyState {
+    fn new(config: &ProxyConfig) -> Self {
+        let initial_target_map = build_target_map(&config.targets);
+
+        let caches = initial_target_map.iter()
+            .filter_map(|entry| {
+                let (path, (_, _, _, _, _, _, _, _, _, cache_config, _, _)) = entry.pair();
+                cache_config.as_ref().map(|config| {
+                    (path.clone(), Cache::new(config))
+                })
+            })
+            .collect::<DashMap<_, _>>();
+
+        ProxyState {
+            target_map: initial_target_map,
+            circuit_breakers: DashMap::new(),
+            rate_limiters: DashMap::new(),
+            caches,
+            concurrency_limiter: Arc::new(Semaphore::new(config.server.pool_size)),
+            ongoing_requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+
+
+async fn run_proxy(
+    config: Arc<RwLock<ProxyConfig>>,
+    proxy_state: Arc<RwLock<ProxyState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_read_guard = config.read().await;
+    let addr = format!("{}:{}", config_read_guard.server.host, config_read_guard.server.port)
         .parse::<SocketAddr>()?;
 
-    let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size));
+    let concurrency_limiter = Arc::new(Semaphore::new(config_read_guard.server.pool_size));
     let ongoing_requests = Arc::new(AtomicUsize::new(0));
 
-    let retry_config = Arc::new(config.retries);
-    let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
-    let default_timeout_seconds = config.default_timeout_seconds;
-    let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
-    let security_headers_config = Arc::new(config.security_headers_config.clone());
+    let retry_config = Arc::new(config_read_guard.retries.clone());
+    let default_circuit_breaker_config = Arc::new(config_read_guard.default_circuit_breaker_config.clone());
+    let default_timeout_seconds = config_read_guard.default_timeout_seconds;
+    let default_rate_limiter_config = Arc::new(config_read_guard.default_rate_limiter_config.clone());
+    let security_headers_config = Arc::new(config_read_guard.security_headers_config.clone());
 
     let mut http_connector = HttpConnector::new();
-    if let Some(recv_buffer_size) = config.server.recv_buffer_size {
+    if let Some(recv_buffer_size) = config_read_guard.server.recv_buffer_size {
         http_connector.set_recv_buffer_size(Some(recv_buffer_size));
     }
-    if let Some(send_buffer_size) = config.server.send_buffer_size {
+    if let Some(send_buffer_size) = config_read_guard.server.send_buffer_size {
         http_connector.set_send_buffer_size(Some(send_buffer_size));
     }
 
     let https_connector = HttpsConnector::new();
 
     let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
-        .pool_max_idle_per_host(config.server.pool_size)
+        .pool_max_idle_per_host(config_read_guard.server.pool_size)
         .build(https_connector);
 
-    let initial_target_map = build_target_map(&config.targets);
+    let initial_target_map = build_target_map(&config_read_guard.targets);
 
     let caches = initial_target_map.iter()
         .filter_map(|entry| {
@@ -630,9 +661,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
-
-
-
 
 fn build_target_map(
     targets: &[Target],
@@ -763,6 +791,13 @@ where
                 }
 
                 apply_security_headers(response.headers_mut(), &security_headers_config).await;
+                
+                if let Some(config) = &logging_config {
+                    if config.log_responses {
+                        info!(request_id = %request_id, "Outgoing response (from cache): {:?}", response);
+                    }
+                }
+
                 return Ok(response);
             }
         }
@@ -1136,16 +1171,14 @@ fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
     }
 }
 
-fn main() {
-    let config = match read_config() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("Failed to read config: {}", e);
-            std::process::exit(1);
-        }
-    };
+#[tokio::main]
+async fn main() {
+    let config_path = "config.toml";
+    let mut config_mod_time = get_config_modification_time(config_path).expect("Failed to get config modification time");
 
-    let log_level = match config.server.max_logging_level.as_str() {
+    let initial_config = read_config(config_path).expect("Failed to read initial config");
+
+    let log_level = match initial_config.server.max_logging_level.as_str() {
         "DEBUG" => tracing::Level::DEBUG,
         "INFO" => tracing::Level::INFO,
         "WARN" => tracing::Level::WARN,
@@ -1163,25 +1196,61 @@ fn main() {
 
     info!("Starting proxy...");
 
-    let worker_threads = config.runtime.worker_threads;
+    let config = Arc::new(RwLock::new(initial_config));
 
-    let rt = Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()
-        .unwrap();
+    let proxy_state = {
+        let config_read_guard = config.read().await;
+        Arc::new(RwLock::new(ProxyState::new(&*config_read_guard)))
+    };
 
-    rt.block_on(async {
-        if let Err(e) = run_proxy(config).await {
-            error!("Error running proxy: {}", e);
+    let proxy_state_clone = proxy_state.clone();
+    let config_clone = config.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+
+        loop {
+            interval.tick().await;
+
+            match get_config_modification_time(config_path) {
+                Ok(mod_time) if mod_time > config_mod_time => {
+                    match read_config(config_path) {
+                        Ok(new_config) => {
+                            info!("Configuration file changed, reloading...");
+                            let mut config = config_clone.write().await;
+                            *config = new_config;
+
+                            let mut proxy_state = proxy_state_clone.write().await;
+                            *proxy_state = ProxyState::new(&*config);
+                            config_mod_time = mod_time;
+                        }
+                        Err(err) => {
+                            error!("Failed to reload config: {}", err);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!("Failed to get config modification time: {}", err);
+                }
+            }
         }
     });
+
+    if let Err(e) = run_proxy(config, proxy_state).await {
+        error!("Error running proxy: {}", e);
+    }
 }
 
-fn read_config() -> Result<ProxyConfig, config::ConfigError> {
+fn read_config(path: &str) -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
-    settings.merge(config::File::with_name("config")).unwrap();
+    settings.merge(config::File::with_name(path)).unwrap();
     settings.try_into()
+}
+
+fn get_config_modification_time(path: &str) -> Result<SystemTime, std::io::Error> {
+    let metadata = fs::metadata(path)?;
+    metadata.modified()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
