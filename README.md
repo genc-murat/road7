@@ -1,107 +1,30 @@
-# Road7 - Advanced HTTP Proxy Server
+# Road7 Proxy Server
 
 <div align="center">
     <img src="/road7logo.png">
 </div>
 
 
-Road7 is a sophisticated HTTP proxy server implemented in Rust, designed to handle complex web traffic scenarios with features such as retries, circuit breaking, rate limiting, caching, and request/response transformations. Built with `hyper`, `tokio`, and `serde` libraries, Road7 ensures high performance and flexibility.
+## Overview
+
+Road7 is a high-performance, feature-rich proxy server implemented in Rust. It leverages `hyper`, `tokio`, and `serde` to provide sophisticated functionalities such as retries, circuit breaking, rate limiting, caching, request/response transformations, and security headers. This server is highly configurable, allowing fine-tuned control over its behavior and performance.
 
 ## Features
 
 - **Retries**: Configurable retry strategies to handle transient failures.
-- **Circuit Breaking**: Protects services from being overwhelmed by failures.
-- **Rate Limiting**: Limits the rate of requests to ensure fair usage and prevent abuse.
-- **Caching**: Caches responses to improve performance and reduce load on backend services.
-- **Request/Response Transformations**: Modify requests and responses as they pass through the proxy.
-- **Logging**: Configurable logging levels for detailed request and response logging.
+- **Circuit Breaking**: Automatically opens and closes circuits based on failure rates.
+- **Rate Limiting**: Multiple rate limiting strategies to control request flow.
+- **Caching**: Configurable response caching for improved performance.
+- **Request/Response Transformations**: Modify headers and content dynamically.
+- **Security Headers**: Enhanced security with configurable HTTP headers.
+- **Logging**: Detailed request and response logging.
+- **CORS Support**: Configurable Cross-Origin Resource Sharing.
 
 ## Configuration
 
-Road7 is configured using a `config.toml` file, which defines the server settings, target endpoints, and their specific configurations.
+Road7 uses a configuration file (in `toml` format) to manage its settings. Below is a detailed description of each configuration section and its options.
 
-### Configuration Fields
-
-#### `ProxyConfig`
-- **server**: The server configuration (`ServerConfig`).
-- **targets**: A list of target configurations (`Target`).
-- **retries**: Global retry configuration (`RetryConfig`).
-- **default_circuit_breaker_config**: Default circuit breaker configuration (`CircuitBreakerConfig`).
-- **default_timeout_seconds**: Default timeout in seconds for all targets (default: `30`).
-- **default_rate_limiter_config**: Optional default rate limiter configuration (`RateLimiterConfig`).
-
-#### `ServerConfig`
-- **host**: The host address to bind the server to.
-- **port**: The port number to listen on.
-- **max_logging_level**: Maximum logging level (`DEBUG`, `INFO`, `WARN`, `ERROR`).
-- **pool_size**: Connection pool size (default: `10`).
-- **recv_buffer_size**: Optional receive buffer size.
-- **send_buffer_size**: Optional send buffer size.
-
-#### `Target`
-- **path**: The path pattern to match for routing requests.
-- **url**: The target URL to which the requests should be proxied.
-- **retries**: Optional retry configuration for this target (`RetryConfig`).
-- **request_transforms**: Optional list of request transformations (`Transform`).
-- **response_transforms**: Optional list of response transformations (`Transform`).
-- **circuit_breaker_config**: Optional circuit breaker configuration for this target (`CircuitBreakerConfig`).
-- **rate_limiter_config**: Optional rate limiter configuration for this target (`RateLimiterConfig`).
-- **routing_header**: Optional header for routing decisions.
-- **routing_values**: Optional map of header values to target URLs.
-- **timeout_seconds**: Optional timeout in seconds for this target.
-- **cache_config**: Optional caching configuration for this target (`CacheConfig`).
-- **logging_config**: Optional logging configuration for this target (`LoggingConfig`).
-
-#### `LoggingConfig`
-- **log_requests**: Whether to log incoming requests.
-- **log_responses**: Whether to log outgoing responses.
-
-#### `Transform`
-- **transform_type**: The type of transformation (`header`).
-- **name**: The name of the header to be transformed.
-- **value**: The value to be set for the header (optional).
-- **operation**: The operation to be performed (`Set`, `Remove`, `Append`).
-
-#### `CircuitBreakerConfig`
-- **max_failures**: Maximum number of failures before opening the circuit.
-- **reset_timeout_seconds**: Time in seconds to wait before transitioning from open to half-open state.
-- **half_open_attempts**: Number of attempts in half-open state before transitioning to closed or open state.
-
-#### `RateLimiterConfig`
-- **TokenBucket**: Token bucket rate limiter configuration.
-  - **refill_rate**: Number of tokens refilled per second.
-  - **burst_capacity**: Maximum number of tokens.
-  - **header_key**: Optional header key for dynamic rate limiting.
-- **LeakyBucket**: Leaky bucket rate limiter configuration.
-  - **leak_rate**: Number of tokens leaked per second.
-  - **bucket_size**: Maximum number of tokens.
-  - **header_key**: Optional header key for dynamic rate limiting.
-- **FixedWindow**: Fixed window rate limiter configuration.
-  - **rate**: Maximum number of requests per window.
-  - **window_seconds**: Duration of the window in seconds.
-  - **header_key**: Optional header key for dynamic rate limiting.
-- **SlidingLog**: Sliding log rate limiter configuration.
-  - **rate**: Maximum number of requests per window.
-  - **window_seconds**: Duration of the window in seconds.
-  - **header_key**: Optional header key for dynamic rate limiting.
-- **SlidingWindow**: Sliding window rate limiter configuration.
-  - **rate**: Maximum number of requests per window.
-  - **window_seconds**: Duration of the window in seconds.
-  - **header_key**: Optional header key for dynamic rate limiting.
-
-#### `RetryConfig`
-- **strategy**: Retry strategy (`ExponentialBackoff`, `LinearBackoff`, `FixedInterval`, `RandomDelay`, `IncrementalBackoff`, `FibonacciBackoff`, `GeometricBackoff`, `HarmonicBackoff`, `JitterBackoff`).
-- **base_delay_seconds**: Base delay between retries in seconds.
-- **max_attempts**: Maximum number of retry attempts.
-- **factor**: Optional factor for exponential and geometric backoff strategies.
-- **step_delay_seconds**: Optional step delay for linear and incremental backoff strategies.
-
-#### `CacheConfig`
-- **ttl_seconds**: Time to live in seconds for cache entries.
-- **max_size**: Maximum number of cache entries.
-- **serialize**: Whether to serialize data in the cache.
-
-### Example Configuration (`config.toml`)
+### Example Configuration File (config.toml)
 
 ```toml
 [server]
@@ -112,99 +35,363 @@ pool_size = 10
 recv_buffer_size = 8192
 send_buffer_size = 8192
 
-[retries]
-strategy = "ExponentialBackoff"
-base_delay_seconds = 1
-max_attempts = 3
-
-[default_circuit_breaker_config]
-max_failures = 3
-reset_timeout_seconds = 30
-half_open_attempts = 1
-
-default_timeout_seconds = 30
+[runtime]
+worker_threads = 4
 
 [[targets]]
-path = "/api/service1"
-url = "http://localhost:8081"
-retries = { strategy = "FixedInterval", base_delay_seconds = 2, max_attempts = 5 }
-request_transforms = [
-    { type = "header", name = "X-Request-ID", value = "12345", operation = "Set" }
-]
-response_transforms = [
-    { type = "header", name = "X-Response-Time", operation = "Remove" }
-]
-circuit_breaker_config = { max_failures = 5, reset_timeout_seconds = 60, half_open_attempts = 3 }
-rate_limiter_config = { type = "TokenBucket", refill_rate = 10, burst_capacity = 20 }
-timeout_seconds = 10
-cache_config = { ttl_seconds = 60, max_size = 100, serialize = true }
-logging_config = { log_requests = true, log_responses = true }
+path = "/api"
+url = "https://backend.service/api"
+timeout_seconds = 30
+
+[targets.retries]
+strategy = "ExponentialBackoff"
+base_delay_seconds = 2
+max_attempts = 3
+factor = 2.0
+
+[[targets.request_transforms]]
+type = "Header"
+name = "X-Forwarded-For"
+value = "127.0.0.1"
+operation = "Set"
+
+[[targets.response_transforms]]
+type = "Header"
+name = "Cache-Control"
+value = "no-store"
+operation = "Set"
+
+[targets.circuit_breaker_config]
+max_failures = 5
+reset_timeout_seconds = 60
+half_open_attempts = 2
+
+[targets.rate_limiter_config]
+type = "TokenBucket"
+refill_rate = 10
+burst_capacity = 50
+
+[targets.cache_config]
+ttl_seconds = 300
+max_size = 1024
+serialize = true
+
+[targets.logging_config]
+log_requests = true
+log_responses = true
+
+[targets.cors_config]
+enabled = true
+allow_origin = "*"
+allow_headers = "*"
+allow_methods = "GET,POST,PUT,DELETE,OPTIONS"
+
+[security_headers_config]
+strict_transport_security = "max-age=31536000; includeSubDomains"
+x_content_type_options = "nosniff"
+x_frame_options = "DENY"
+content_security_policy = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+x_xss_protection = "1; mode=block"
+referrer_policy = "no-referrer"
+permissions_policy = "geolocation=(), microphone=(), camera=()"
 ```
 
-## Running the Proxy Server
+### Configuration Options
 
-### Prerequisites
+#### Server Configuration
 
-- Rust and Cargo installed on your system.
+- `host`: The host address to bind the proxy server.
+- `port`: The port number to bind the proxy server.
+- `max_logging_level`: The maximum logging level (e.g., DEBUG, INFO, WARN, ERROR).
+- `pool_size`: The maximum number of idle connections per host.
+- `recv_buffer_size`: The size of the receive buffer.
+- `send_buffer_size`: The size of the send buffer.
 
-### Steps
+#### Runtime Configuration
 
-1. Clone the repository:
-    ```sh
-    git clone https://github.com/genc-murat/road7.git
-    cd road7
-    ```
+- `worker_threads`: The number of worker threads to use.
 
-2. Create a `config.toml` file based on the example configuration provided above.
+#### Target Configuration
 
-3. Build and run the proxy server:
-    ```sh
-    cargo build --release
-    ./target/release/road7
-    ```
+Each target configuration specifies the details for routing and handling requests to a specific backend service.
 
-## Detailed Explanation of Components
+- `path`: The path prefix to match incoming requests.
+- `url`: The URL of the backend service.
+- `timeout_seconds`: The timeout duration for requests in seconds.
 
-### `ProxyConfig`
+#### Retry Configuration
 
-Holds the main configuration for the proxy, including server settings, retry strategies, circuit breaker configurations, and rate limiter settings.
+Specifies the retry strategy for handling transient failures.
 
-### `ServerConfig`
+- `strategy`: The retry strategy (e.g., ExponentialBackoff, LinearBackoff, FixedInterval).
+- `base_delay_seconds`: The base delay between retries in seconds.
+- `max_attempts`: The maximum number of retry attempts.
+- `factor`: The factor by which to multiply the delay for exponential backoff.
 
-Defines the server settings, such as host, port, logging level, and connection pool size.
+#### Transformations
 
-### `Target`
+Configures request and response transformations.
 
-Represents a backend service to which requests are proxied. Each target has its own configurations for retries, circuit breaking, rate limiting, caching, and logging.
+- `type`: The type of transformation (e.g., Header).
+- `name`: The name of the header to transform.
+- `value`: The value to set for the header.
+- `operation`: The operation to perform (e.g., Set, Remove, Append).
 
-### `CircuitBreaker`
+#### Circuit Breaker Configuration
 
-Manages the state of the circuit breaker for a target, ensuring that requests are not sent to unhealthy services.
+Specifies the circuit breaker settings.
 
-### `RateLimiter`
+- `max_failures`: The maximum number of failures before opening the circuit.
+- `reset_timeout_seconds`: The duration to wait before transitioning to half-open state.
+- `half_open_attempts`: The number of attempts allowed in the half-open state.
 
-Implements various rate limiting strategies to control the flow of requests.
+#### Rate Limiter Configuration
 
-### `Cache`
+Configures rate limiting to control request flow.
 
-Provides caching functionality to store responses and reduce the load on backend services.
+- `type`: The type of rate limiter (e.g., TokenBucket, LeakyBucket, FixedWindow, SlidingLog, SlidingWindow).
+- `refill_rate`: The rate at which tokens are refilled (for TokenBucket).
+- `burst_capacity`: The maximum burst capacity (for TokenBucket).
 
-### Request and Response Transformations
+#### Cache Configuration
 
-Allows modification of requests and responses using a series of transformations defined in the configuration.
+Specifies the caching settings.
 
-## Logging
+- `ttl_seconds`: The time-to-live for cached responses in seconds.
+- `max_size`: The maximum size of the cache.
+- `serialize`: Whether to serialize cached responses.
 
-The proxy server uses `tracing` for logging, with configurable logging levels. Logs can be directed to various outputs and provide detailed information about incoming requests, outgoing responses, and internal operations.
+#### Logging Configuration
+
+Configures request and response logging.
+
+- `log_requests`: Whether to log incoming requests.
+- `log_responses`: Whether to log outgoing responses.
+
+#### CORS Configuration
+
+Specifies the Cross-Origin Resource Sharing settings.
+
+- `enabled`: Whether CORS is enabled.
+- `allow_origin`: The allowed origins for CORS.
+- `allow_headers`: The allowed headers for CORS.
+- `allow_methods`: The allowed methods for CORS.
+
+#### Security Headers Configuration
+
+Configures security-related HTTP headers.
+
+- `strict_transport_security`: The value for the `Strict-Transport-Security` header.
+- `x_content_type_options`: The value for the `X-Content-Type-Options` header.
+- `x_frame_options`: The value for the `X-Frame-Options` header.
+- `content_security_policy`: The value for the `Content-Security-Policy` header.
+- `x_xss_protection`: The value for the `X-XSS-Protection` header.
+- `referrer_policy`: The value for the `Referrer-Policy` header.
+- `permissions_policy`: The value for the `Permissions-Policy` header.
+
+## Detailed Example
+
+### Server Configuration
+
+The server section defines the general settings for the proxy server, including the host, port, logging level, connection pool size, and buffer sizes.
+
+```toml
+[server]
+host = "127.0.0.1"  # The host address to bind the proxy server
+port = 8080  # The port number to bind the proxy server
+max_logging_level = "INFO"  # The maximum logging level (e.g., DEBUG, INFO, WARN, ERROR)
+pool_size = 10  # The maximum number of idle connections per host
+recv_buffer_size = 8192  # The size of the receive buffer
+send_buffer_size = 8192  # The size of the send buffer
+```
+
+### Runtime Configuration
+
+The runtime section defines the number of worker threads to be used by the proxy server.
+
+```toml
+[runtime]
+worker_threads = 4  # The number of worker threads to use
+```
+
+### Target Configuration
+
+Each target section defines the routing and handling details for a specific backend service.
+
+```toml
+[[targets]]
+path = "/api"  # The path prefix to match incoming requests
+url = "https://backend.service/api"  # The URL of the backend service
+timeout_seconds = 30  # The timeout duration for requests in seconds
+
+[targets.retries]
+strategy = "ExponentialBackoff"  # The retry strategy (e.g., ExponentialBackoff, LinearBackoff, FixedInterval)
+base_delay_seconds = 2  # The base delay between retries in seconds
+max_attempts = 3  # The maximum number of retry attempts
+factor = 2.0  # The factor by which to multiply the delay for exponential backoff
+
+[[targets.request_transforms]]
+type = "Header"  # The type of transformation (e.g., Header)
+name = "X-Forwarded-For"  # The name of the header to transform
+value = "127.0.0.1"  # The value to set for the header
+operation = "Set"  # The operation to perform (e.g., Set, Remove, Append)
+
+[[targets.response_transforms]]
+type = "Header"
+name = "Cache-Control"
+value = "no-store"
+operation = "Set"
+
+[targets.circuit_breaker_config]
+max_failures = 5  # The maximum number of failures before opening the circuit
+reset_timeout_seconds = 60  # The duration to wait before transitioning to half-open state
+half_open_attempts = 2  # The number of attempts allowed in the half-open state
+
+[targets.rate_limiter_config]
+type = "TokenBucket"  # The type of rate limiter (e.g., TokenBucket, LeakyBucket, FixedWindow, SlidingLog, SlidingWindow)
+refill_rate = 10  # The rate at which tokens are refilled (for TokenBucket)
+burst_capacity = 50  # The maximum burst capacity (for TokenBucket)
+
+```toml
+[targets.cache_config]
+ttl_seconds = 300  # The time-to-live for cached responses in seconds
+max_size = 1024  # The maximum size of the cache
+serialize = true  # Whether to serialize cached responses
+
+[targets.logging_config]
+log_requests = true  # Whether to log incoming requests
+log_responses = true  # Whether to log outgoing responses
+
+[targets.cors_config]
+enabled = true  # Whether CORS is enabled
+allow_origin = "*"  # The allowed origins for CORS
+allow_headers = "*"  # The allowed headers for CORS
+allow_methods = "GET,POST,PUT,DELETE,OPTIONS"  # The allowed methods for CORS
+```
+
+### Security Headers Configuration
+
+The security headers section configures various HTTP headers to enhance security.
+
+```toml
+[security_headers_config]
+strict_transport_security = "max-age=31536000; includeSubDomains"  # The value for the `Strict-Transport-Security` header
+x_content_type_options = "nosniff"  # The value for the `X-Content-Type-Options` header
+x_frame_options = "DENY"  # The value for the `X-Frame-Options` header
+content_security_policy = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"  # The value for the `Content-Security-Policy` header
+x_xss_protection = "1; mode=block"  # The value for the `X-XSS-Protection` header
+referrer_policy = "no-referrer"  # The value for the `Referrer-Policy` header
+permissions_policy = "geolocation=(), microphone=(), camera=()"  # The value for the `Permissions-Policy` header
+```
+
+### Detailed Explanation of Configuration Options
+
+#### Server Configuration
+
+- **host**: The host address to bind the proxy server. It can be an IP address or a domain name.
+- **port**: The port number to bind the proxy server. Ensure that the port is not already in use.
+- **max_logging_level**: Specifies the maximum level of logging. Valid values are `DEBUG`, `INFO`, `WARN`, `ERROR`.
+- **pool_size**: Sets the maximum number of idle connections per host. This can improve performance by reusing existing connections.
+- **recv_buffer_size**: Configures the size of the receive buffer in bytes.
+- **send_buffer_size**: Configures the size of the send buffer in bytes.
+
+#### Runtime Configuration
+
+- **worker_threads**: Specifies the number of worker threads for the server. More threads can handle more simultaneous requests but consume more system resources.
+
+#### Target Configuration
+
+Each target defines how incoming requests matching the specified path should be handled and forwarded to the backend service.
+
+- **path**: The path prefix to match incoming requests. All requests starting with this path will be routed to the specified target.
+- **url**: The URL of the backend service to forward the requests to.
+- **timeout_seconds**: Specifies the maximum duration in seconds to wait for a response from the backend service.
+
+#### Retry Configuration
+
+Configures how the proxy should retry failed requests to the backend service.
+
+- **strategy**: Defines the retry strategy to use. Options include `ExponentialBackoff`, `LinearBackoff`, `FixedInterval`, etc.
+- **base_delay_seconds**: The initial delay between retries in seconds.
+- **max_attempts**: The maximum number of retry attempts.
+- **factor**: The factor by which to multiply the delay for exponential backoff strategies.
+
+#### Transformations
+
+You can define transformations to apply to requests and responses, such as modifying headers.
+
+- **type**: The type of transformation, currently supporting `Header`.
+- **name**: The name of the header to transform.
+- **value**: The value to set for the header.
+- **operation**: The operation to perform, such as `Set`, `Remove`, or `Append`.
+
+#### Circuit Breaker Configuration
+
+Circuit breakers help in preventing system overload by controlling traffic to a failing service.
+
+- **max_failures**: The number of failures before the circuit breaker opens.
+- **reset_timeout_seconds**: The time to wait before attempting to close the circuit breaker.
+- **half_open_attempts**: The number of allowed attempts in the half-open state before deciding to close or re-open the circuit.
+
+#### Rate Limiter Configuration
+
+Rate limiting helps in controlling the number of requests to prevent abuse and maintain performance.
+
+- **type**: The type of rate limiter, such as `TokenBucket`, `LeakyBucket`, `FixedWindow`, `SlidingLog`, or `SlidingWindow`.
+- **refill_rate**: For `TokenBucket`, the rate at which tokens are refilled.
+- **burst_capacity**: For `TokenBucket`, the maximum number of tokens that can be accumulated.
+
+#### Cache Configuration
+
+Caches responses to improve performance and reduce load on backend services.
+
+- **ttl_seconds**: The time-to-live for cached responses in seconds.
+- **max_size**: The maximum number of responses to keep in the cache.
+- **serialize**: Whether to serialize cached responses for persistence.
+
+#### Logging Configuration
+
+Configures logging for requests and responses.
+
+- **log_requests**: If `true`, logs incoming requests.
+- **log_responses**: If `true`, logs outgoing responses.
+
+#### CORS Configuration
+
+Configures Cross-Origin Resource Sharing settings to control how resources are shared across different origins.
+
+- **enabled**: Enables or disables CORS.
+- **allow_origin**: Specifies the allowed origins for CORS.
+- **allow_headers**: Specifies the allowed headers for CORS.
+- **allow_methods**: Specifies the allowed methods for CORS.
+
+#### Security Headers Configuration
+
+Enhances security by configuring various HTTP headers.
+
+- **strict_transport_security**: Sets the `Strict-Transport-Security` header value.
+- **x_content_type_options**: Sets the `X-Content-Type-Options` header value.
+- **x_frame_options**: Sets the `X-Frame-Options` header value.
+- **content_security_policy**: Sets the `Content-Security-Policy` header value.
+- **x_xss_protection**: Sets the `X-XSS-Protection` header value.
+- **referrer_policy**: Sets the `Referrer-Policy` header value.
+- **permissions_policy**: Sets the `Permissions-Policy` header value.
+
+## Running the Proxy
+
+To run the proxy server, ensure that you have the configuration file (`config.toml`) in place, and then start the server using the command:
+
+```sh
+cargo run --release
+```
+
+The server will start and listen on the configured host and port, handling requests according to the specified configuration.
 
 ## Contributing
 
-Contributions are welcome! Please fork the repository and submit a pull request with your changes. Ensure that your code adheres to the existing style and includes appropriate tests.
+Contributions are welcome! Please open an issue or submit a pull request on GitHub.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
-## Contact
-
-For any questions or feedback, please open an issue on GitHub or contact the repository maintainer.
