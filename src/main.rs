@@ -1,8 +1,6 @@
 mod retry;
 
 use retry::{RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
-
-
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{
@@ -21,7 +19,6 @@ use std::convert::Infallible;
 use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
-use rand::{Rng, thread_rng};
 use tracing_appender::non_blocking;
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
