@@ -1,8 +1,10 @@
 mod retry;
 mod rate_limiter;
+mod transform;
 
 use retry::{RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
 use rate_limiter::{RateLimiter, RateLimiterConfig};
+use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{
@@ -125,16 +127,6 @@ struct CorsConfig {
 struct LoggingConfig {
     log_requests: bool,
     log_responses: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct Transform {
-    #[serde(rename = "type")]
-    transform_type: String,
-    name: String,
-    #[serde(default)]
-    value: Option<String>,
-    operation: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -288,7 +280,7 @@ struct CacheEntry {
     cors_headers: Option<CorsHeaders>,
     etag: Option<String>,
     last_modified: Option<String>,
-    vary_headers: Option<Vec<String>>, // Yeni alan
+    vary_headers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -310,16 +302,13 @@ impl CacheEntry {
             }
         });
 
-        // Extract the body bytes
-        let body_bytes = hyper::body::to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
+        let body_bytes = to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
 
-        // Generate ETag
         let etag = headers.get("ETag").map(|v| v.to_str().unwrap().to_string()).or_else(|| {
             let hash = format!("{:x}", md5::compute(&body_bytes));
             Some(format!("\"{}\"", hash))
         });
 
-        // Generate Last-Modified
         let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
 
         let vary_headers = headers.get(VARY)
@@ -334,7 +323,7 @@ impl CacheEntry {
             cors_headers,
             etag,
             last_modified,
-            vary_headers, // Yeni alan
+            vary_headers,
         }
     }
 }
@@ -347,12 +336,11 @@ impl Cache {
             serialize: config.serialize,
         };
 
-        // Arka planda çalışan temizleme görevi
         let cache_clone = cache.clone();
         tokio::spawn(async move {
             loop {
                 cache_clone.clean_expired_entries().await;
-                sleep(Duration::from_secs(60)).await; // 60 saniyede bir temizleme işlemi yap
+                sleep(Duration::from_secs(60)).await;
             }
         });
 
@@ -386,7 +374,7 @@ impl Cache {
             cors_headers: response.cors_headers.clone(),
             etag: response.etag.clone(),
             last_modified: response.last_modified.clone(),
-            vary_headers: response.vary_headers.clone(), // Yeni alan
+            vary_headers: response.vary_headers.clone(),
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
@@ -522,20 +510,17 @@ async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config
         if let Some(value) = &config.content_security_policy {
             headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
         } else {
-            // Default CSP
             let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
             headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
         }
         if let Some(value) = &config.x_xss_protection {
             headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(value).unwrap());
         } else {
-            // Default X-XSS-Protection
             headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
         }
         if let Some(value) = &config.referrer_policy {
             headers.insert(REFERRER_POLICY, HeaderValue::from_str(value).unwrap());
         } else {
-            // Default Referrer-Policy
             headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         }
         if let Some(value) = &config.permissions_policy {
@@ -673,7 +658,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         signal::ctrl_c().await.expect("Failed to capture CTRL+C signal");
         info!("Shutdown signal received, completing pending requests...");
 
-        // Wait until all ongoing requests are completed
         while proxy_state_for_shutdown.ongoing_requests.load(Ordering::SeqCst) > 0 {
             sleep(Duration::from_millis(100)).await;
         }
@@ -806,7 +790,6 @@ where
                         response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
                     }
 
-                    // Add ETag and Last-Modified headers
                     if let Some(etag) = entry.etag.clone() {
                         response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
                     }
@@ -866,7 +849,6 @@ where
         }
     }
 
-    // Add conditional request headers
     if let Some(cache) = proxy_state.caches.get(&cache_key) {
         if let Some(cache_entry) = cache.get(&cache_key).await {
             if let Some(etag) = cache_entry.etag.clone() {
@@ -934,7 +916,6 @@ where
                                     response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
                                 }
 
-                                // Add ETag and Last-Modified headers
                                 if let Some(etag) = cache_entry.etag.clone() {
                                     response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
                                 }
@@ -1146,53 +1127,11 @@ fn rebuild_request(
 }
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
-    let headers = req.headers_mut();
-    apply_header_transforms(headers, transforms);
+    Transform::apply_request_transforms(req, transforms);
 }
 
 fn apply_response_transforms(resp: &mut Response<Body>, transforms: &[Transform]) {
-    let headers = resp.headers_mut();
-    apply_header_transforms(headers, transforms);
-}
-
-fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
-    for transform in transforms {
-        match transform.operation.as_str() {
-            "Set" => {
-                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                    let header_value = transform.value
-                        .as_deref()
-                        .map_or(Cow::Borrowed(""), Cow::from);
-                    headers.insert(header_name, HeaderValue::from_str(&header_value).unwrap_or_else(|_| HeaderValue::from_static("")));
-                }
-            }
-            "Remove" => {
-                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                    headers.remove(header_name);
-                }
-            }
-            "Append" => {
-                if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                    if let Some(current_value) = headers.get(&header_name).cloned() {
-                        let new_value = format!(
-                            "{}{}",
-                            current_value.to_str().unwrap_or(""),
-                            transform.value.as_ref().unwrap_or(&"".to_string())
-                        );
-                        if let Ok(new_header_value) = HeaderValue::from_str(&new_value) {
-                            headers.insert(header_name, new_header_value);
-                        }
-                    } else {
-                        let header_value = transform.value
-                            .as_deref()
-                            .map_or(HeaderValue::from_static(""), |v| HeaderValue::from_str(v).unwrap_or_else(|_| HeaderValue::from_static("")));
-                        headers.insert(header_name, header_value);
-                    }
-                }
-            }
-            _ => warn!("Unknown transform operation: {}", transform.operation),
-        }
-    }
+    Transform::apply_response_transforms(resp, transforms);
 }
 
 fn main() {
