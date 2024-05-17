@@ -29,14 +29,12 @@ use tracing_appender::non_blocking;
 use std::hash::{Hash, Hasher};
 use dashmap::DashMap;
 use http::header::{HeaderMap, HeaderName};
-use std::borrow::Cow;
 use regex::Regex;
 use ammonia::clean;
 use hyper::body::to_bytes;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
-use thiserror::Error;
 
 const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
 const FEATURE_POLICY: HeaderName = HeaderName::from_static("feature-policy");
