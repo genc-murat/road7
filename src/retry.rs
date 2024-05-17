@@ -1,5 +1,6 @@
 use std::time::Duration;
 use rand::{Rng, thread_rng};
+use serde::{Deserialize, Serialize};
 
 pub trait RetryStrategy: Send + Sync {
     fn delay(&mut self) -> Duration;
@@ -271,5 +272,71 @@ impl RetryStrategy for JitterBackoffStrategy {
 
     fn max_attempts(&self) -> usize {
         self.max_attempts
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RetryConfig {
+    pub strategy: String,
+    pub base_delay_seconds: u64,
+    pub max_attempts: usize,
+    pub factor: Option<f64>,
+    pub step_delay_seconds: Option<u64>,
+}
+
+impl RetryConfig {
+    pub fn to_strategy(&self) -> Box<dyn RetryStrategy> {
+        match self.strategy.as_str() {
+            "ExponentialBackoff" => Box::new(ExponentialBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.factor.unwrap_or(2.0),
+                self.max_attempts,
+            )),
+            "LinearBackoff" => Box::new(LinearBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds)),
+                self.max_attempts,
+            )),
+            "FixedInterval" => Box::new(FixedIntervalBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.max_attempts,
+            )),
+            "RandomDelay" => Box::new(RandomDelayStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds * 2)),
+                self.max_attempts,
+            )),
+            "IncrementalBackoff" => Box::new(IncrementalBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                Duration::from_secs(self.step_delay_seconds.unwrap_or(1)),
+                self.max_attempts,
+            )),
+            "FibonacciBackoff" => Box::new(FibonacciBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.max_attempts,
+            )),
+            "GeometricBackoff" => Box::new(GeometricBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.factor.unwrap_or(2.0),
+                self.max_attempts,
+            )),
+            "HarmonicBackoff" => Box::new(HarmonicBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.max_attempts,
+            )),
+            "JitterBackoff" => Box::new(JitterBackoffStrategy::new(
+                Box::new(ExponentialBackoffStrategy::new(
+                    Duration::from_secs(self.base_delay_seconds),
+                    self.factor.unwrap_or(2.0),
+                    self.max_attempts
+                )),
+                0.5,
+                self.max_attempts,
+            )),
+            _ => Box::new(FixedIntervalBackoffStrategy::new(
+                Duration::from_secs(self.base_delay_seconds),
+                self.max_attempts,
+            )),
+        }
     }
 }

@@ -4,7 +4,7 @@ mod transform;
 mod error;
 
 use error::ProxyError;
-use retry::{RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
+use retry::{RetryConfig, RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
 use rate_limiter::{RateLimiter, RateLimiterConfig};
 use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
@@ -1127,70 +1127,4 @@ fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
     settings.merge(config::File::with_name("config")).unwrap();
     settings.try_into()
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct RetryConfig {
-    strategy: String,
-    base_delay_seconds: u64,
-    max_attempts: usize,
-    factor: Option<f64>,
-    step_delay_seconds: Option<u64>,
-}
-
-impl RetryConfig {
-    fn to_strategy(&self) -> Box<dyn RetryStrategy> {
-        match self.strategy.as_str() {
-            "ExponentialBackoff" => Box::new(ExponentialBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.factor.unwrap_or(2.0),
-                self.max_attempts,
-            )),
-            "LinearBackoff" => Box::new(LinearBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds)),
-                self.max_attempts,
-            )),
-            "FixedInterval" => Box::new(FixedIntervalBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts,
-            )),
-            "RandomDelay" => Box::new(RandomDelayStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                Duration::from_secs(self.step_delay_seconds.unwrap_or(self.base_delay_seconds * 2)),
-                self.max_attempts,
-            )),
-            "IncrementalBackoff" => Box::new(IncrementalBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                Duration::from_secs(self.step_delay_seconds.unwrap_or(1)),
-                self.max_attempts,
-            )),
-            "FibonacciBackoff" => Box::new(FibonacciBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts,
-            )),
-            "GeometricBackoff" => Box::new(GeometricBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.factor.unwrap_or(2.0),
-                self.max_attempts,
-            )),
-            "HarmonicBackoff" => Box::new(HarmonicBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts,
-            )),
-            "JitterBackoff" => Box::new(JitterBackoffStrategy::new(
-                Box::new(ExponentialBackoffStrategy::new(
-                    Duration::from_secs(self.base_delay_seconds),
-                    self.factor.unwrap_or(2.0),
-                    self.max_attempts
-                )),
-                0.5,
-                self.max_attempts,
-            )),
-            _ => Box::new(FixedIntervalBackoffStrategy::new(
-                Duration::from_secs(self.base_delay_seconds),
-                self.max_attempts,
-            )),
-        }
-    }
 }
