@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use hyper::header::{HeaderMap, HeaderName};
-use std::borrow::Cow;
+use hyper::header::{HeaderMap, HeaderName,HeaderValue};
 use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -29,38 +28,35 @@ impl Transform {
             match transform.operation.as_str() {
                 "Set" => {
                     if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                        let header_value = transform.value
-                            .as_deref()
-                            .map_or(Cow::Borrowed(""), Cow::from);
-                        headers.insert(header_name, hyper::header::HeaderValue::from_str(&header_value).unwrap_or_else(|_| hyper::header::HeaderValue::from_static("")));
+                        let header_value = transform.value.as_deref().unwrap_or("");
+                        match HeaderValue::from_str(header_value) {
+                            Ok(value) => { headers.insert(header_name, value); },
+                            Err(_) => { headers.insert(header_name, HeaderValue::from_static("")); },
+                        }
                     }
-                }
+                },
                 "Remove" => {
                     if let Ok(header_name) = transform.name.parse::<HeaderName>() {
                         headers.remove(header_name);
                     }
-                }
+                },
                 "Append" => {
                     if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                        if let Some(current_value) = headers.get(&header_name).cloned() {
-                            let new_value = format!(
-                                "{}{}",
-                                current_value.to_str().unwrap_or(""),
-                                transform.value.as_ref().unwrap_or(&"".to_string())
-                            );
-                            if let Ok(new_header_value) = hyper::header::HeaderValue::from_str(&new_value) {
-                                headers.insert(header_name, new_header_value);
-                            }
+                        let new_value = if let Some(current_value) = headers.get(&header_name) {
+                            format!("{}{}", current_value.to_str().unwrap_or(""), transform.value.as_deref().unwrap_or(""))
                         } else {
-                            let header_value = transform.value
-                                .as_deref()
-                                .map_or(hyper::header::HeaderValue::from_static(""), |v| hyper::header::HeaderValue::from_str(v).unwrap_or_else(|_| hyper::header::HeaderValue::from_static("")));
-                            headers.insert(header_name, header_value);
+                            transform.value.as_deref().unwrap_or("").to_string()
+                        };
+                        
+                        match HeaderValue::from_str(&new_value) {
+                            Ok(value) => { headers.insert(header_name, value); },
+                            Err(_) => { headers.insert(header_name, HeaderValue::from_static("")); },
                         }
                     }
-                }
+                },
                 _ => warn!("Unknown transform operation: {}", transform.operation),
             }
         }
     }
+    
 }

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber;
 use std::convert::Infallible;
 use tokio::signal;

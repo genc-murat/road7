@@ -1,5 +1,3 @@
-// src/circuit_breaker.rs
-
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
