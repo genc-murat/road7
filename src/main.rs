@@ -1,7 +1,7 @@
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{
-    HeaderValue, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY, X_XSS_PROTECTION, REFERRER_POLICY, ACCESS_CONTROL_ALLOW_ORIGIN,ACCESS_CONTROL_ALLOW_HEADERS,ACCESS_CONTROL_ALLOW_METHODS,USER_AGENT,HOST
+    HeaderValue, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY, X_XSS_PROTECTION, REFERRER_POLICY, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, USER_AGENT, HOST, VARY
 };
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
@@ -31,6 +31,7 @@ use tokio::runtime::Builder;
 use thiserror::Error;
 
 const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
+const FEATURE_POLICY: HeaderName = HeaderName::from_static("feature-policy");
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
@@ -141,6 +142,7 @@ struct SecurityHeadersConfig {
     x_xss_protection: Option<String>,
     referrer_policy: Option<String>,
     permissions_policy: Option<String>,
+    feature_policy: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -631,9 +633,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     graceful.await.map_err(Into::into)
 }
 
-
-
-
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
@@ -737,40 +736,44 @@ where
         }
     }
 
-    let cache_key = create_cache_key(&target_url, &original_req);
+    let cache_key = create_cache_key(&target_url, &original_req, None);
 
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
             if let Some(cache_entry) = cache.get(&cache_key).await {
                 info!(request_id = %request_id, "Cache hit for: {}", cache_key);
-                let mut response = Response::builder()
-                    .status(cache_entry.status)
-                    .body(Body::from(cache_entry.response.clone()))
-                    .unwrap();
-                *response.headers_mut() = cache_entry.headers.clone();
-                if let Some(cors_headers) = cache_entry.cors_headers.clone() {
-                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, cors_headers.allow_origin);
-                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
-                    response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
-                }
-
-                // Add ETag and Last-Modified headers
-                if let Some(etag) = cache_entry.etag.clone() {
-                    response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
-                }
-                if let Some(last_modified) = cache_entry.last_modified.clone() {
-                    response.headers_mut().insert("Last-Modified", HeaderValue::from_str(&last_modified).unwrap());
-                }
-
-                apply_security_headers(response.headers_mut(), &security_headers_config).await;
-
-                if let Some(config) = &logging_config {
-                    if config.log_responses {
-                        info!(request_id = %request_id, "Outgoing response (from cache): {:?}", response);
+                let vary_headers = cache_entry.vary_headers.clone();
+                let new_cache_key = create_cache_key(&target_url, &original_req, vary_headers.as_ref());
+                if let Some(entry) = cache.get(&new_cache_key).await {
+                    let mut response = Response::builder()
+                        .status(entry.status)
+                        .body(Body::from(entry.response.clone()))
+                        .unwrap();
+                    *response.headers_mut() = entry.headers.clone();
+                    if let Some(cors_headers) = entry.cors_headers.clone() {
+                        response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, cors_headers.allow_origin);
+                        response.headers_mut().insert(ACCESS_CONTROL_ALLOW_HEADERS, cors_headers.allow_headers);
+                        response.headers_mut().insert(ACCESS_CONTROL_ALLOW_METHODS, cors_headers.allow_methods);
                     }
-                }
 
-                return Ok(response);
+                    // Add ETag and Last-Modified headers
+                    if let Some(etag) = entry.etag.clone() {
+                        response.headers_mut().insert("ETag", HeaderValue::from_str(&etag).unwrap());
+                    }
+                    if let Some(last_modified) = entry.last_modified.clone() {
+                        response.headers_mut().insert("Last-Modified", HeaderValue::from_str(&last_modified).unwrap());
+                    }
+
+                    apply_security_headers(response.headers_mut(), &security_headers_config).await;
+
+                    if let Some(config) = &logging_config {
+                        if config.log_responses {
+                            info!(request_id = %request_id, "Outgoing response (from cache): {:?}", response);
+                        }
+                    }
+
+                    return Ok(response);
+                }
             }
         }
     }
@@ -900,6 +903,7 @@ where
 
                             let mut cache_entry = CacheEntry::from_response(&mut resp, &cors_config).await;
                             cache_entry.response = response_data.to_vec();
+                            let cache_key = create_cache_key(&target_url, &original_req, cache_entry.vary_headers.as_ref());
                             let cache = proxy_state.caches.entry(cache_key.clone()).or_insert_with(|| Cache::new(cache_config));
                             cache.put(cache_key, cache_entry).await;
 
@@ -976,8 +980,6 @@ where
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
-
-
 
 fn find_target(
     proxy_state: &Arc<ProxyState>,
@@ -1058,7 +1060,6 @@ fn find_target(
     }
     target
 }
-
 
 fn rebuild_request(
     original_req: &Request<Body>,
@@ -1349,7 +1350,6 @@ impl RetryStrategy for LinearBackoffStrategy {
     }
 }
 
-
 pub struct RandomDelayStrategy {
     min_delay: Duration,
     max_delay: Duration,
@@ -1378,7 +1378,6 @@ impl RetryStrategy for RandomDelayStrategy {
         self.max_attempts
     }
 }
-
 
 pub struct IncrementalBackoffStrategy {
     initial_delay: Duration,
@@ -1409,7 +1408,6 @@ impl RetryStrategy for IncrementalBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 pub struct FibonacciBackoffStrategy {
     base_delay: Duration,
@@ -1444,7 +1442,6 @@ impl RetryStrategy for FibonacciBackoffStrategy {
     }
 }
 
-
 pub struct GeometricBackoffStrategy {
     base_delay: Duration,
     factor: f64,
@@ -1475,7 +1472,6 @@ impl RetryStrategy for GeometricBackoffStrategy {
     }
 }
 
-
 pub struct HarmonicBackoffStrategy {
     base_delay: Duration,
     current_attempt: usize,
@@ -1504,7 +1500,6 @@ impl RetryStrategy for HarmonicBackoffStrategy {
         self.max_attempts
     }
 }
-
 
 pub struct JitterBackoffStrategy {
     strategy: Box<dyn RetryStrategy>,
@@ -1565,6 +1560,7 @@ struct CacheEntry {
     cors_headers: Option<CorsHeaders>,
     etag: Option<String>,
     last_modified: Option<String>,
+    vary_headers: Option<Vec<String>>, // Yeni alan
 }
 
 #[derive(Debug, Clone)]
@@ -1598,6 +1594,10 @@ impl CacheEntry {
         // Generate Last-Modified
         let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
 
+        let vary_headers = headers.get(VARY)
+            .and_then(|header| header.to_str().ok())
+            .map(|header_value| header_value.split(',').map(|s| s.trim().to_string()).collect());
+
         Self {
             response: body_bytes.to_vec(),
             headers,
@@ -1606,10 +1606,10 @@ impl CacheEntry {
             cors_headers,
             etag,
             last_modified,
+            vary_headers, // Yeni alan
         }
     }
 }
-
 
 impl Cache {
     fn new(config: &CacheConfig) -> Self {
@@ -1658,6 +1658,7 @@ impl Cache {
             cors_headers: response.cors_headers.clone(),
             etag: response.etag.clone(),
             last_modified: response.last_modified.clone(),
+            vary_headers: response.vary_headers.clone(), // Yeni alan
         };
         self.entries.insert(key.clone(), entry);
         info!("Cache updated for key: {}", key);
@@ -1681,18 +1682,20 @@ impl Cache {
     }
 }
 
-
-fn create_cache_key(target_url: &str, req: &Request<Body>) -> String {
+fn create_cache_key(target_url: &str, req: &Request<Body>, vary_headers: Option<&Vec<String>>) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     target_url.hash(&mut hasher);
     req.uri().to_string().hash(&mut hasher);
-    req.headers().iter().for_each(|(key, value)| {
-        key.hash(&mut hasher);
-        value.hash(&mut hasher);
-    });
+    if let Some(headers) = vary_headers {
+        for header_name in headers {
+            if let Some(value) = req.headers().get(header_name) {
+                header_name.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+        }
+    }
     format!("{:x}", hasher.finish())
 }
-
 
 async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let uri = req.uri().to_string();
@@ -1809,11 +1812,10 @@ async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config
         }
         if let Some(value) = &config.permissions_policy {
             headers.insert(PERMISSIONS_POLICY, HeaderValue::from_str(value).unwrap());
-        } else {
-            // Default Permissions-Policy
-            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_static("geolocation=(), microphone=(), camera=()"));
+        }
+        if let Some(value) = &config.feature_policy {
+            headers.insert(FEATURE_POLICY, HeaderValue::from_str(value).unwrap());
         }
         info!("Applied security headers: {:?}", headers);
     }
 }
-
