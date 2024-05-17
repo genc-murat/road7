@@ -1,6 +1,8 @@
 mod retry;
+mod rate_limiter;
 
 use retry::{RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
+use rate_limiter::{RateLimiter, RateLimiterConfig};
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{
@@ -259,244 +261,290 @@ enum CircuitState {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-enum RateLimiterConfig {
-    TokenBucket {
-        refill_rate: u64,
-        burst_capacity: u64,
-        header_key: Option<String>,
-    },
-    LeakyBucket {
-        leak_rate: u64,
-        bucket_size: u64,
-        header_key: Option<String>,
-    },
-    FixedWindow {
-        rate: u64,
-        window_seconds: u64,
-        header_key: Option<String>,
-    },
-    SlidingLog {
-        rate: u64,
-        window_seconds: u64,
-        header_key: Option<String>,
-    },
-    SlidingWindow {
-        rate: u64,
-        window_seconds: u64,
-        header_key: Option<String>,
-    },
+struct CacheConfig {
+    ttl_seconds: u64,
+    max_size: usize,
+    #[serde(default = "default_serialize")]
+    serialize: bool,
 }
 
-impl Default for RateLimiterConfig {
-    fn default() -> Self {
-        RateLimiterConfig::TokenBucket {
-            refill_rate: 10,
-            burst_capacity: 20,
-            header_key: None,
+fn default_serialize() -> bool {
+    false
+}
+
+#[derive(Debug, Clone)]
+struct Cache {
+    entries: Arc<DashMap<String, CacheEntry>>,
+    ttl: Duration,
+    serialize: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    response: Vec<u8>,
+    headers: HeaderMap,
+    status: StatusCode,
+    expires_at: Instant,
+    cors_headers: Option<CorsHeaders>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    vary_headers: Option<Vec<String>>, // Yeni alan
+}
+
+#[derive(Debug, Clone)]
+struct CorsHeaders {
+    allow_origin: HeaderValue,
+    allow_headers: HeaderValue,
+    allow_methods: HeaderValue,
+}
+
+impl CacheEntry {
+    async fn from_response(response: &mut Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
+        let headers = response.headers().clone();
+        let status = response.status();
+        let cors_headers = cors_config.as_ref().map(|config| {
+            CorsHeaders {
+                allow_origin: HeaderValue::from_str(config.allow_origin.as_deref().unwrap_or("*")).unwrap(),
+                allow_headers: HeaderValue::from_str(config.allow_headers.as_deref().unwrap_or("*")).unwrap(),
+                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
+            }
+        });
+
+        // Extract the body bytes
+        let body_bytes = hyper::body::to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
+
+        // Generate ETag
+        let etag = headers.get("ETag").map(|v| v.to_str().unwrap().to_string()).or_else(|| {
+            let hash = format!("{:x}", md5::compute(&body_bytes));
+            Some(format!("\"{}\"", hash))
+        });
+
+        // Generate Last-Modified
+        let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
+
+        let vary_headers = headers.get(VARY)
+            .and_then(|header| header.to_str().ok())
+            .map(|header_value| header_value.split(',').map(|s| s.trim().to_string()).collect());
+
+        Self {
+            response: body_bytes.to_vec(),
+            headers,
+            status,
+            expires_at: Instant::now(),
+            cors_headers,
+            etag,
+            last_modified,
+            vary_headers, // Yeni alan
         }
     }
 }
 
-#[derive(Debug)]
-enum RateLimiter {
-    TokenBucket(Arc<Semaphore>, u64, String),
-    LeakyBucket(RwLock<LeakyBucketState>, String),
-    FixedWindow(RwLock<FixedWindowState>, String),
-    SlidingLog(RwLock<SlidingLogState>, String),
-    SlidingWindow(RwLock<SlidingWindowState>, String),
-}
+impl Cache {
+    fn new(config: &CacheConfig) -> Self {
+        let cache = Self {
+            entries: Arc::new(DashMap::new()),
+            ttl: Duration::from_secs(config.ttl_seconds),
+            serialize: config.serialize,
+        };
 
-#[derive(Debug)]
-struct LeakyBucketState {
-    tokens: u64,
-    last_refill: Instant,
-    leak_rate: u64,
-    bucket_size: u64,
-}
-
-#[derive(Debug)]
-struct FixedWindowState {
-    current_requests: u64,
-    window_start: Instant,
-    rate: u64,
-    window_seconds: u64,
-}
-
-#[derive(Debug)]
-struct SlidingLogState {
-    requests: Vec<Instant>,
-    rate: u64,
-    window_seconds: u64,
-}
-
-#[derive(Debug)]
-struct SlidingWindowState {
-    current_requests: u64,
-    window_start: Instant,
-    rate: u64,
-    window_seconds: u64,
-}
-
-impl RateLimiter {
-    fn new(config: &RateLimiterConfig, header_value: Option<&str>) -> Self {
-        let key_suffix = header_value.unwrap_or_default();
-        match config {
-            RateLimiterConfig::TokenBucket {
-                refill_rate,
-                burst_capacity,
-                header_key: _,
-            } => {
-                let semaphore_key = format!("TokenBucket{}", key_suffix);
-                RateLimiter::TokenBucket(
-                    Arc::new(Semaphore::new(*burst_capacity as usize)),
-                    *refill_rate,
-                    semaphore_key,
-                )
+        // Arka planda çalışan temizleme görevi
+        let cache_clone = cache.clone();
+        tokio::spawn(async move {
+            loop {
+                cache_clone.clean_expired_entries().await;
+                sleep(Duration::from_secs(60)).await; // 60 saniyede bir temizleme işlemi yap
             }
-            RateLimiterConfig::LeakyBucket {
-                leak_rate,
-                bucket_size,
-                header_key: _,
-            } => {
-                let bucket_key = format!("LeakyBucket{}", key_suffix);
-                RateLimiter::LeakyBucket(
-                    RwLock::new(LeakyBucketState {
-                        tokens: *bucket_size,
-                        last_refill: Instant::now(),
-                        leak_rate: *leak_rate,
-                        bucket_size: *bucket_size,
-                    }),
-                    bucket_key,
-                )
+        });
+
+        cache
+    }
+
+    async fn get(&self, key: &str) -> Option<CacheEntry> {
+        if let Some(entry) = self.entries.get(key) {
+            if entry.expires_at > Instant::now() {
+                info!("Cache hit for key: {}", key);
+                return Some(entry.clone());
+            } else {
+                warn!("Cache entry expired for key: {}", key);
+                self.remove_expired(key).await;
             }
-            RateLimiterConfig::FixedWindow {
-                rate,
-                window_seconds,
-                header_key: _,
-            } => {
-                let window_key = format!("FixedWindow{}", key_suffix);
-                RateLimiter::FixedWindow(
-                    RwLock::new(FixedWindowState {
-                        current_requests: 0,
-                        window_start: Instant::now(),
-                        rate: *rate,
-                        window_seconds: *window_seconds,
-                    }),
-                    window_key,
-                )
-            }
-            RateLimiterConfig::SlidingLog {
-                rate,
-                window_seconds,
-                header_key: _,
-            } => {
-                let log_key = format!("SlidingLog{}", key_suffix);
-                RateLimiter::SlidingLog(
-                    RwLock::new(SlidingLogState {
-                        requests: Vec::new(),
-                        rate: *rate,
-                        window_seconds: *window_seconds,
-                    }),
-                    log_key,
-                )
-            }
-            RateLimiterConfig::SlidingWindow {
-                rate,
-                window_seconds,
-                header_key: _,
-            } => {
-                let window_key = format!("SlidingWindow{}", key_suffix);
-                RateLimiter::SlidingWindow(
-                    RwLock::new(SlidingWindowState {
-                        current_requests: 0,
-                        window_start: Instant::now(),
-                        rate: *rate,
-                        window_seconds: *window_seconds,
-                    }),
-                    window_key,
-                )
+        }
+        info!("Cache miss for key: {}", key);
+        None
+    }
+
+    async fn put(&self, key: String, response: CacheEntry) {
+        let entry = CacheEntry {
+            response: if self.serialize {
+                serde_json::to_vec(&response.response).unwrap_or_else(|_| response.response.clone())
+            } else {
+                response.response
+            },
+            headers: response.headers.clone(),
+            status: response.status,
+            expires_at: Instant::now() + self.ttl,
+            cors_headers: response.cors_headers.clone(),
+            etag: response.etag.clone(),
+            last_modified: response.last_modified.clone(),
+            vary_headers: response.vary_headers.clone(), // Yeni alan
+        };
+        self.entries.insert(key.clone(), entry);
+        info!("Cache updated for key: {}", key);
+    }
+
+    async fn remove_expired(&self, key: &str) {
+        self.entries.remove(key);
+        warn!("Cache entry removed for key: {}", key);
+    }
+
+    async fn clean_expired_entries(&self) {
+        let now = Instant::now();
+        let keys_to_remove: Vec<String> = self.entries.iter()
+            .filter(|entry| entry.value().expires_at <= now)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            self.remove_expired(&key).await;
+        }
+    }
+}
+
+fn create_cache_key(target_url: &str, req: &Request<Body>, vary_headers: Option<&Vec<String>>) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target_url.hash(&mut hasher);
+    req.uri().to_string().hash(&mut hasher);
+    if let Some(headers) = vary_headers {
+        for header_name in headers {
+            if let Some(value) = req.headers().get(header_name) {
+                header_name.hash(&mut hasher);
+                value.hash(&mut hasher);
             }
         }
     }
+    format!("{:x}", hasher.finish())
+}
 
-    async fn acquire(&self) -> bool {
-        match self {
-            RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
-                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    let permit = Arc::new(permit);
-                    let refill_rate = *refill_rate;
-                    tokio::spawn(async move {
-                        let delay = Duration::from_secs(1) / refill_rate as u32;
-                        loop {
-                            sleep(delay).await;
-                            drop(permit.clone());
-                        }
-                    });
-                    true
-                } else {
-                    false
-                }
-            }
-            RateLimiter::LeakyBucket(state, _) => {
-                let mut state = state.write().await;
-                let now = Instant::now();
-                let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-                let leaked_tokens = (state.leak_rate as f64 * elapsed).floor() as u64;
-                state.tokens =
-                    state.tokens.saturating_add(leaked_tokens).min(state.bucket_size);
-                state.last_refill = now;
-                if state.tokens > 0 {
-                    state.tokens -= 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            RateLimiter::FixedWindow(state, _) => {
-                let mut state = state.write().await;
-                let now = Instant::now();
-                if now.duration_since(state.window_start).as_secs() >= state.window_seconds {
+async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
+    let uri = req.uri().to_string();
+    let uri_regex = Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap();
+    if !uri_regex.is_match(&uri) {
+        return Err("Invalid URI detected".to_string());
+    }
 
-                    state.current_requests = 0;
-                    state.window_start = now;
-                }
-                if state.current_requests < state.rate {
-                    state.current_requests += 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            RateLimiter::SlidingLog(state, _) => {
-                let mut state = state.write().await;
-                let now = Instant::now();
-                let window_start = now - Duration::from_secs(state.window_seconds);
-
-                state.requests.retain(|&t| t >= window_start);
-                if state.requests.len() < state.rate as usize {
-                    state.requests.push(now);
-                    true
-                } else {
-                    false
-                }
-            }
-            RateLimiter::SlidingWindow(state, _) => {
-                let mut state = state.write().await;
-                let now = Instant::now();
-                let window_end =
-                    state.window_start + Duration::from_secs(state.window_seconds);
-                if now >= window_end {
-                    state.window_start = now;
-                    state.current_requests = 1;
-                    true
-                } else if state.current_requests < state.rate {
-                    state.current_requests += 1;
-                    true
-                } else {
-                    false
-                }
-            }
+    for (name, value) in req.headers() {
+        let header_name_regex = Regex::new(r"^[a-zA-Z0-9\-]+$").unwrap();
+        if !header_name_regex.is_match(name.as_str()) {
+            return Err(format!("Invalid header name detected: {}", name));
         }
+
+        let header_value_regex = Regex::new(r"^[\x20-\x7E]+$").unwrap();
+        if !header_value_regex.is_match(value.to_str().unwrap_or_default()) {
+            return Err(format!("Invalid header value detected: {:?}", value));
+        }
+    }
+
+    let body_bytes = to_bytes(req.body_mut()).await.unwrap();
+    let body_content = String::from_utf8_lossy(&body_bytes);
+    let sanitized_body = clean(&body_content);
+
+    if body_content != sanitized_body {
+        return Err("HTML sanitization failed: potentially harmful content detected".to_string());
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+enum ProxyError {
+    #[error("Service Unavailable: Circuit Breaker is Open")]
+    CircuitBreakerOpen,
+    #[error("Too Many Requests: Rate limit exceeded")]
+    RateLimitExceeded,
+    #[error("Gateway Timeout")]
+    Timeout,
+    #[error("Internal Server Error: {0}")]
+    InternalServerError(String),
+    #[error("Bad Request: {0}")]
+    BadRequest(String),
+    #[error("Not Found: {0}")]
+    NotFound(String),
+    #[error("Service Unavailable: {0}")]
+    ServiceUnavailable(String),
+}
+
+impl From<ProxyError> for Response<Body> {
+    fn from(error: ProxyError) -> Self {
+        match error {
+            ProxyError::CircuitBreakerOpen => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::RateLimitExceeded => Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::Timeout => Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::InternalServerError(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::BadRequest(_) => Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::NotFound(_) => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::ServiceUnavailable(_) => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+        }
+    }
+}
+
+async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config: &Option<SecurityHeadersConfig>) {
+    if let Some(config) = security_headers_config.as_ref() {
+        if let Some(value) = &config.strict_transport_security {
+            headers.insert(STRICT_TRANSPORT_SECURITY, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.x_content_type_options {
+            headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.x_frame_options {
+            headers.insert(X_FRAME_OPTIONS, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.content_security_policy {
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default CSP
+            let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
+        }
+        if let Some(value) = &config.x_xss_protection {
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default X-XSS-Protection
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
+        }
+        if let Some(value) = &config.referrer_policy {
+            headers.insert(REFERRER_POLICY, HeaderValue::from_str(value).unwrap());
+        } else {
+            // Default Referrer-Policy
+            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        }
+        if let Some(value) = &config.permissions_policy {
+            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_str(value).unwrap());
+        }
+        if let Some(value) = &config.feature_policy {
+            headers.insert(FEATURE_POLICY, HeaderValue::from_str(value).unwrap());
+        }
+        info!("Applied security headers: {:?}", headers);
     }
 }
 
@@ -1258,293 +1306,5 @@ impl RetryConfig {
                 self.max_attempts,
             )),
         }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct CacheConfig {
-    ttl_seconds: u64,
-    max_size: usize,
-    #[serde(default = "default_serialize")]
-    serialize: bool,
-}
-
-fn default_serialize() -> bool {
-    false
-}
-
-#[derive(Debug, Clone)]
-struct Cache {
-    entries: Arc<DashMap<String, CacheEntry>>,
-    ttl: Duration,
-    serialize: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    response: Vec<u8>,
-    headers: HeaderMap,
-    status: StatusCode,
-    expires_at: Instant,
-    cors_headers: Option<CorsHeaders>,
-    etag: Option<String>,
-    last_modified: Option<String>,
-    vary_headers: Option<Vec<String>>, // Yeni alan
-}
-
-#[derive(Debug, Clone)]
-struct CorsHeaders {
-    allow_origin: HeaderValue,
-    allow_headers: HeaderValue,
-    allow_methods: HeaderValue,
-}
-
-impl CacheEntry {
-    async fn from_response(response: &mut Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
-        let headers = response.headers().clone();
-        let status = response.status();
-        let cors_headers = cors_config.as_ref().map(|config| {
-            CorsHeaders {
-                allow_origin: HeaderValue::from_str(config.allow_origin.as_deref().unwrap_or("*")).unwrap(),
-                allow_headers: HeaderValue::from_str(config.allow_headers.as_deref().unwrap_or("*")).unwrap(),
-                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
-            }
-        });
-
-        // Extract the body bytes
-        let body_bytes = hyper::body::to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
-
-        // Generate ETag
-        let etag = headers.get("ETag").map(|v| v.to_str().unwrap().to_string()).or_else(|| {
-            let hash = format!("{:x}", md5::compute(&body_bytes));
-            Some(format!("\"{}\"", hash))
-        });
-
-        // Generate Last-Modified
-        let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
-
-        let vary_headers = headers.get(VARY)
-            .and_then(|header| header.to_str().ok())
-            .map(|header_value| header_value.split(',').map(|s| s.trim().to_string()).collect());
-
-        Self {
-            response: body_bytes.to_vec(),
-            headers,
-            status,
-            expires_at: Instant::now(),
-            cors_headers,
-            etag,
-            last_modified,
-            vary_headers, // Yeni alan
-        }
-    }
-}
-
-impl Cache {
-    fn new(config: &CacheConfig) -> Self {
-        let cache = Self {
-            entries: Arc::new(DashMap::new()),
-            ttl: Duration::from_secs(config.ttl_seconds),
-            serialize: config.serialize,
-        };
-
-        // Arka planda çalışan temizleme görevi
-        let cache_clone = cache.clone();
-        tokio::spawn(async move {
-            loop {
-                cache_clone.clean_expired_entries().await;
-                sleep(Duration::from_secs(60)).await; // 60 saniyede bir temizleme işlemi yap
-            }
-        });
-
-        cache
-    }
-
-    async fn get(&self, key: &str) -> Option<CacheEntry> {
-        if let Some(entry) = self.entries.get(key) {
-            if entry.expires_at > Instant::now() {
-                info!("Cache hit for key: {}", key);
-                return Some(entry.clone());
-            } else {
-                warn!("Cache entry expired for key: {}", key);
-                self.remove_expired(key).await;
-            }
-        }
-        info!("Cache miss for key: {}", key);
-        None
-    }
-
-    async fn put(&self, key: String, response: CacheEntry) {
-        let entry = CacheEntry {
-            response: if self.serialize {
-                serde_json::to_vec(&response.response).unwrap_or_else(|_| response.response.clone())
-            } else {
-                response.response
-            },
-            headers: response.headers.clone(),
-            status: response.status,
-            expires_at: Instant::now() + self.ttl,
-            cors_headers: response.cors_headers.clone(),
-            etag: response.etag.clone(),
-            last_modified: response.last_modified.clone(),
-            vary_headers: response.vary_headers.clone(), // Yeni alan
-        };
-        self.entries.insert(key.clone(), entry);
-        info!("Cache updated for key: {}", key);
-    }
-
-    async fn remove_expired(&self, key: &str) {
-        self.entries.remove(key);
-        warn!("Cache entry removed for key: {}", key);
-    }
-
-    async fn clean_expired_entries(&self) {
-        let now = Instant::now();
-        let keys_to_remove: Vec<String> = self.entries.iter()
-            .filter(|entry| entry.value().expires_at <= now)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.remove_expired(&key).await;
-        }
-    }
-}
-
-fn create_cache_key(target_url: &str, req: &Request<Body>, vary_headers: Option<&Vec<String>>) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    target_url.hash(&mut hasher);
-    req.uri().to_string().hash(&mut hasher);
-    if let Some(headers) = vary_headers {
-        for header_name in headers {
-            if let Some(value) = req.headers().get(header_name) {
-                header_name.hash(&mut hasher);
-                value.hash(&mut hasher);
-            }
-        }
-    }
-    format!("{:x}", hasher.finish())
-}
-
-async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
-    let uri = req.uri().to_string();
-    let uri_regex = Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap();
-    if !uri_regex.is_match(&uri) {
-        return Err("Invalid URI detected".to_string());
-    }
-
-    for (name, value) in req.headers() {
-        let header_name_regex = Regex::new(r"^[a-zA-Z0-9\-]+$").unwrap();
-        if !header_name_regex.is_match(name.as_str()) {
-            return Err(format!("Invalid header name detected: {}", name));
-        }
-
-        let header_value_regex = Regex::new(r"^[\x20-\x7E]+$").unwrap();
-        if !header_value_regex.is_match(value.to_str().unwrap_or_default()) {
-            return Err(format!("Invalid header value detected: {:?}", value));
-        }
-    }
-
-    let body_bytes = to_bytes(req.body_mut()).await.unwrap();
-    let body_content = String::from_utf8_lossy(&body_bytes);
-    let sanitized_body = clean(&body_content);
-
-    if body_content != sanitized_body {
-        return Err("HTML sanitization failed: potentially harmful content detected".to_string());
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Error)]
-enum ProxyError {
-    #[error("Service Unavailable: Circuit Breaker is Open")]
-    CircuitBreakerOpen,
-    #[error("Too Many Requests: Rate limit exceeded")]
-    RateLimitExceeded,
-    #[error("Gateway Timeout")]
-    Timeout,
-    #[error("Internal Server Error: {0}")]
-    InternalServerError(String),
-    #[error("Bad Request: {0}")]
-    BadRequest(String),
-    #[error("Not Found: {0}")]
-    NotFound(String),
-    #[error("Service Unavailable: {0}")]
-    ServiceUnavailable(String),
-}
-
-impl From<ProxyError> for Response<Body> {
-    fn from(error: ProxyError) -> Self {
-        match error {
-            ProxyError::CircuitBreakerOpen => Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::RateLimitExceeded => Response::builder()
-                .status(StatusCode::TOO_MANY_REQUESTS)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::Timeout => Response::builder()
-                .status(StatusCode::GATEWAY_TIMEOUT)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::InternalServerError(_) => Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::BadRequest(_) => Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::NotFound(_) => Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-            ProxyError::ServiceUnavailable(_) => Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(Body::from(error.to_string()))
-                .unwrap(),
-        }
-    }
-}
-
-async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config: &Option<SecurityHeadersConfig>) {
-    if let Some(config) = security_headers_config.as_ref() {
-        if let Some(value) = &config.strict_transport_security {
-            headers.insert(STRICT_TRANSPORT_SECURITY, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.x_content_type_options {
-            headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.x_frame_options {
-            headers.insert(X_FRAME_OPTIONS, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.content_security_policy {
-            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
-        } else {
-            // Default CSP
-            let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
-            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
-        }
-        if let Some(value) = &config.x_xss_protection {
-            headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(value).unwrap());
-        } else {
-            // Default X-XSS-Protection
-            headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
-        }
-        if let Some(value) = &config.referrer_policy {
-            headers.insert(REFERRER_POLICY, HeaderValue::from_str(value).unwrap());
-        } else {
-            // Default Referrer-Policy
-            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-        }
-        if let Some(value) = &config.permissions_policy {
-            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.feature_policy {
-            headers.insert(FEATURE_POLICY, HeaderValue::from_str(value).unwrap());
-        }
-        info!("Applied security headers: {:?}", headers);
     }
 }
