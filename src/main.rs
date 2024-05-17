@@ -339,40 +339,42 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
 
 async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config: &Option<SecurityHeadersConfig>) {
     if let Some(config) = security_headers_config.as_ref() {
-        if let Some(value) = &config.strict_transport_security {
-            headers.insert(STRICT_TRANSPORT_SECURITY, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.x_content_type_options {
-            headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.x_frame_options {
-            headers.insert(X_FRAME_OPTIONS, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.content_security_policy {
-            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(value).unwrap());
+        insert_header(headers, STRICT_TRANSPORT_SECURITY, &config.strict_transport_security);
+        insert_header(headers, X_CONTENT_TYPE_OPTIONS, &config.x_content_type_options);
+        insert_header(headers, X_FRAME_OPTIONS, &config.x_frame_options);
+        
+        if let Some(csp) = &config.content_security_policy {
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(csp).unwrap());
         } else {
             let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
             headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
         }
-        if let Some(value) = &config.x_xss_protection {
-            headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(value).unwrap());
+        
+        if let Some(xss_protection) = &config.x_xss_protection {
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(xss_protection).unwrap());
         } else {
             headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
         }
-        if let Some(value) = &config.referrer_policy {
-            headers.insert(REFERRER_POLICY, HeaderValue::from_str(value).unwrap());
+        
+        if let Some(referrer_policy) = &config.referrer_policy {
+            headers.insert(REFERRER_POLICY, HeaderValue::from_str(referrer_policy).unwrap());
         } else {
             headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         }
-        if let Some(value) = &config.permissions_policy {
-            headers.insert(PERMISSIONS_POLICY, HeaderValue::from_str(value).unwrap());
-        }
-        if let Some(value) = &config.feature_policy {
-            headers.insert(FEATURE_POLICY, HeaderValue::from_str(value).unwrap());
-        }
+        
+        insert_header(headers, PERMISSIONS_POLICY, &config.permissions_policy);
+        insert_header(headers, FEATURE_POLICY, &config.feature_policy);
+        
         info!("Applied security headers: {:?}", headers);
     }
 }
+
+fn insert_header(headers: &mut HeaderMap, header_name: HeaderName, header_value: &Option<String>) {
+    if let Some(value) = header_value {
+        headers.insert(header_name, HeaderValue::from_str(value).unwrap());
+    }
+}
+
 
 struct ProxyState {
     target_map: DashMap<
