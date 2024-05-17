@@ -4,7 +4,7 @@ mod transform;
 mod error;
 
 use error::ProxyError;
-use retry::{RetryConfig, RetryStrategy, FixedIntervalBackoffStrategy, ExponentialBackoffStrategy, LinearBackoffStrategy, RandomDelayStrategy, IncrementalBackoffStrategy, FibonacciBackoffStrategy, GeometricBackoffStrategy, HarmonicBackoffStrategy, JitterBackoffStrategy};
+use retry::{RetryConfig, RetryStrategy};
 use rate_limiter::{RateLimiter, RateLimiterConfig};
 use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
