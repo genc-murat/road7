@@ -345,22 +345,37 @@ impl RateLimiter {
                 allow_request
             }
             
-            
             RateLimiter::SlidingWindow(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                let window_end = state.window_start + Duration::from_secs(state.window_seconds);
-                if now >= window_end {
-                    state.window_start = now;
-                    state.current_requests = 1;
+            
+                let (mut current_requests, window_start, window_seconds, rate) = {
+                    let state = state.read().await;
+                    (state.current_requests, state.window_start, state.window_seconds, state.rate)
+                };
+            
+                let window_end = window_start + Duration::from_secs(window_seconds);
+            
+                let should_allow = if now >= window_end {
+                    current_requests = 1;
                     true
-                } else if state.current_requests < state.rate {
-                    state.current_requests += 1;
+                } else if current_requests < rate {
+                    current_requests += 1;
                     true
                 } else {
                     false
+                };
+            
+                if should_allow {
+                    let mut state = state.write().await;
+                    if now >= window_end {
+                        state.window_start = now;
+                    }
+                    state.current_requests = current_requests;
                 }
+            
+                should_allow
             }
+            
             RateLimiter::Quota(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
