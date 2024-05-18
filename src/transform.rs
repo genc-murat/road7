@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use hyper::header::{HeaderMap, HeaderName,HeaderValue};
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use tracing::warn;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -25,38 +25,35 @@ impl Transform {
 
     fn apply_header_transforms(headers: &mut HeaderMap, transforms: &[Transform]) {
         for transform in transforms {
-            match transform.operation.as_str() {
-                "Set" => {
-                    if let Ok(header_name) = transform.name.parse::<HeaderName>() {
+            if let Ok(header_name) = transform.name.parse::<HeaderName>() {
+                match transform.operation.as_str() {
+                    "Set" => {
                         let header_value = transform.value.as_deref().unwrap_or("");
-                        match HeaderValue::from_str(header_value) {
-                            Ok(value) => { headers.insert(header_name, value); },
-                            Err(_) => { headers.insert(header_name, HeaderValue::from_static("")); },
-                        }
-                    }
-                },
-                "Remove" => {
-                    if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                        headers.remove(header_name);
-                    }
-                },
-                "Append" => {
-                    if let Ok(header_name) = transform.name.parse::<HeaderName>() {
-                        let new_value = if let Some(current_value) = headers.get(&header_name) {
-                            format!("{}{}", current_value.to_str().unwrap_or(""), transform.value.as_deref().unwrap_or(""))
+                        if let Ok(value) = HeaderValue::from_str(header_value) {
+                            headers.insert(header_name, value);
                         } else {
-                            transform.value.as_deref().unwrap_or("").to_string()
-                        };
-                        
-                        match HeaderValue::from_str(&new_value) {
-                            Ok(value) => { headers.insert(header_name, value); },
-                            Err(_) => { headers.insert(header_name, HeaderValue::from_static("")); },
+                            headers.insert(header_name, HeaderValue::from_static(""));
                         }
-                    }
-                },
-                _ => warn!("Unknown transform operation: {}", transform.operation),
+                    },
+                    "Remove" => {
+                        headers.remove(header_name);
+                    },
+                    "Append" => {
+                        let new_value = headers.get(&header_name)
+                            .and_then(|current_value| current_value.to_str().ok())
+                            .map_or_else(|| transform.value.as_deref().unwrap_or("").to_string(), |current| {
+                                format!("{}{}", current, transform.value.as_deref().unwrap_or(""))
+                            });
+
+                        if let Ok(value) = HeaderValue::from_str(&new_value) {
+                            headers.insert(header_name, value);
+                        } else {
+                            headers.insert(header_name, HeaderValue::from_static(""));
+                        }
+                    },
+                    _ => warn!("Unknown transform operation: {}", transform.operation),
+                }
             }
         }
     }
-    
 }
