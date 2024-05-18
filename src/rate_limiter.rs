@@ -254,19 +254,31 @@ impl RateLimiter {
                 }
             }
             RateLimiter::LeakyBucket(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                let elapsed = now.duration_since(state.last_refill).as_secs_f64();
-                let leaked_tokens = (state.leak_rate as f64 * elapsed).floor() as u64;
-                state.tokens = state.tokens.saturating_add(leaked_tokens).min(state.bucket_size);
-                state.last_refill = now;
-                if state.tokens > 0 {
-                    state.tokens -= 1;
-                    true
+                let (tokens, bucket_size, leak_rate, last_refill) = {
+                    let state = state.read().await;
+                    (state.tokens, state.bucket_size, state.leak_rate, state.last_refill)
+                };
+                
+                let elapsed = now.duration_since(last_refill).as_secs();
+                let leaked_tokens = leak_rate.saturating_mul(elapsed);
+                let new_tokens = tokens.saturating_add(leaked_tokens).min(bucket_size);
+                
+                let should_allow = if new_tokens > 0 {
+                    new_tokens - 1
                 } else {
-                    false
+                    0
+                };
+                
+                {
+                    let mut state = state.write().await;
+                    state.tokens = should_allow;
+                    state.last_refill = now;
                 }
+            
+                should_allow > 0
             }
+            
             RateLimiter::FixedWindow(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
