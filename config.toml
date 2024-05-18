@@ -2,13 +2,15 @@
 [server]
 host = "127.0.0.1"
 port = 3000
-max_logging_level = "INFO"
+max_logging_level = "DEBUG"
 pool_size = 10
 recv_buffer_size = 8192  # Adjust the receive buffer size as needed
 send_buffer_size = 8192  # Adjust the send buffer size as needed
 
+validate_requests = true
+
 [runtime]
-worker_threads = 4
+worker_threads = 2
 
 # Default retry configuration for all targets (if not overridden per target)
 [retries]
@@ -46,13 +48,13 @@ response_transforms = [
 
 [[targets]]
 path = "/api/service2"
-url = "http://localhost:5001"
+url = "https://localhost:7277"
 timeout_seconds = 3
 # This target uses the default retry and circuit breaker configuration
 rate_limiter_config = { TokenBucket = { refill_rate = 2, burst_capacity = 5, header_key = "Client-ID" } }
 cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
 logging_config = { log_requests = true, log_responses = true }
-cors_config = { enabled = true, Access-Control-Allow-Origin = "*", Access-Control-Allow-Headers = "Content-Type", Access-Control-Allow-Methods = "*" }
+
 
 [[targets]]
 path = "/api/service3"
@@ -73,4 +75,3 @@ content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'
 x_xss_protection = "1; mode=block"
 referrer_policy = "no-referrer"
 permissions_policy = "geolocation=(), microphone=(), camera=()"
-feature_policy = "geolocation 'self'; microphone 'self'; camera 'self'"  # New feature-policy field
