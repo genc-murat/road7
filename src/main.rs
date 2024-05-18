@@ -440,6 +440,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
+        .pool_idle_timeout(Duration::from_secs(30))
         .build(https_connector);
 
     let initial_target_map = build_target_map(&config.targets);
