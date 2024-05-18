@@ -238,21 +238,25 @@ impl RateLimiter {
     pub async fn acquire(&self) -> bool {
         match self {
             RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
-                if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                    let permit = Arc::new(permit);
-                    let refill_rate = *refill_rate;
+                if semaphore.try_acquire().is_ok() {
+                    let semaphore = semaphore.clone();
+                    let refill_rate = *refill_rate as f64; // Convert refill_rate to f64
+            
                     tokio::spawn(async move {
-                        let delay = Duration::from_secs(1) / refill_rate as u32;
+                        let delay = Duration::from_secs_f64(1.0 / refill_rate);
                         loop {
                             sleep(delay).await;
-                            drop(permit.clone());
+                            semaphore.add_permits(1);
                         }
                     });
+            
                     true
                 } else {
                     false
                 }
             }
+            
+            
             RateLimiter::LeakyBucket(state, _) => {
                 let now = Instant::now();
                 let (tokens, bucket_size, leak_rate, last_refill) = {
