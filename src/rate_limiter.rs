@@ -409,20 +409,46 @@ impl RateLimiter {
             }
             
             RateLimiter::Dynamic(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                if now.duration_since(state.last_adjusted).as_secs() >= state.window_seconds {
-                    state.current_rate = (state.current_rate as f64 * state.adjust_factor)
-                        .clamp(state.min_rate as f64, state.max_rate as f64) as u64;
-                    state.last_adjusted = now;
+            
+                let (mut current_rate, last_adjusted, window_seconds, adjust_factor, min_rate, max_rate) = {
+                    let state = state.read().await;
+                    (
+                        state.current_rate,
+                        state.last_adjusted,
+                        state.window_seconds,
+                        state.adjust_factor,
+                        state.min_rate,
+                        state.max_rate,
+                    )
+                };
+            
+                let mut should_adjust = false;
+            
+                if now.duration_since(last_adjusted).as_secs() >= window_seconds {
+                    current_rate = (current_rate as f64 * adjust_factor)
+                        .clamp(min_rate as f64, max_rate as f64) as u64;
+                    should_adjust = true;
                 }
-                if state.current_rate > 0 {
-                    state.current_rate -= 1;
+            
+                let allow_request = if current_rate > 0 {
+                    current_rate -= 1;
                     true
                 } else {
                     false
+                };
+            
+                if allow_request || should_adjust {
+                    let mut state = state.write().await;
+                    if should_adjust {
+                        state.last_adjusted = now;
+                    }
+                    state.current_rate = current_rate;
                 }
+            
+                allow_request
             }
+            
         }
     }
 }
