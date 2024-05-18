@@ -957,12 +957,10 @@ fn rebuild_request(
     target_url: &str,
     target_url_len: usize,
 ) -> Request<Body> {
-    // Extract the path and query from the original request
     let path = original_req.uri().path();
     let query = original_req.uri().query().unwrap_or_default();
     let new_path = &path[target_url_len..];
     
-    // Construct the new URI
     let uri_string = if query.is_empty() {
         format!("{}{}", target_url, new_path)
     } else {
@@ -970,16 +968,13 @@ fn rebuild_request(
     };
     let uri = uri_string.parse::<Uri>().expect("Invalid URI");
     
-    // Extract the authority from the new URI
     let authority = uri.authority().map(|auth| auth.to_string());
     
-    // Start building the new request
     let mut builder = Request::builder()
         .method(original_req.method())
         .uri(uri)
         .version(original_req.version());
     
-    // Copy headers from the original request, excluding 'USER_AGENT'
     if let Some(headers) = builder.headers_mut() {
         headers.extend(
             original_req.headers()
@@ -988,13 +983,11 @@ fn rebuild_request(
                 .map(|(key, value)| (key.clone(), value.clone()))
         );
         
-        // Add the 'HOST' header if an authority is present
         if let Some(auth) = authority {
             headers.insert(HOST, HeaderValue::from_str(&auth).unwrap());
         }
     }
     
-    // Build the new request with an empty body
     builder
         .body(Body::empty())
         .expect("Failed to rebuild request")
