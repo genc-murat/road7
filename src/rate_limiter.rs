@@ -313,17 +313,39 @@ impl RateLimiter {
             }
             
             RateLimiter::SlidingLog(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                let window_start = now - Duration::from_secs(state.window_seconds);
-                state.requests.retain(|&t| t >= window_start);
-                if state.requests.len() < state.rate as usize {
-                    state.requests.push(now);
+            
+                // Acquire a read lock to access window_seconds and rate
+                let (window_seconds, rate) = {
+                    let state = state.read().await;
+                    (state.window_seconds, state.rate)
+                };
+            
+                let window_start = now - Duration::from_secs(window_seconds);
+            
+                // Retain only the timestamps within the window
+                let mut requests_within_window = {
+                    let state = state.read().await;
+                    state.requests.iter().filter(|&&t| t >= window_start).cloned().collect::<Vec<_>>()
+                };
+            
+                let allow_request = if requests_within_window.len() < rate as usize {
+                    requests_within_window.push(now);
                     true
                 } else {
                     false
+                };
+            
+                // Update the state with the new requests log
+                if allow_request {
+                    let mut state = state.write().await;
+                    state.requests = requests_within_window;
                 }
+            
+                allow_request
             }
+            
+            
             RateLimiter::SlidingWindow(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
