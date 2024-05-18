@@ -377,19 +377,37 @@ impl RateLimiter {
             }
             
             RateLimiter::Quota(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                if now >= state.reset_time {
-                    state.reset_time = now + Duration::from_secs(state.period_seconds);
-                    state.remaining_quota = state.quota;
+                let (mut remaining_quota, reset_time, period_seconds, quota) = {
+                    let state = state.read().await;
+                    (state.remaining_quota, state.reset_time, state.period_seconds, state.quota)
+                };
+            
+                let mut should_reset = false;
+            
+                if now >= reset_time {
+                    remaining_quota = quota;
+                    should_reset = true;
                 }
-                if state.remaining_quota > 0 {
-                    state.remaining_quota -= 1;
+            
+                let allow_request = if remaining_quota > 0 {
+                    remaining_quota -= 1;
                     true
                 } else {
                     false
+                };
+            
+                if allow_request || should_reset {
+                    let mut state = state.write().await;
+                    if should_reset {
+                        state.reset_time = now + Duration::from_secs(period_seconds);
+                    }
+                    state.remaining_quota = remaining_quota;
                 }
+            
+                allow_request
             }
+            
             RateLimiter::Dynamic(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
