@@ -284,19 +284,34 @@ impl RateLimiter {
             }
             
             RateLimiter::FixedWindow(state, _) => {
-                let mut state = state.write().await;
                 let now = Instant::now();
-                if now.duration_since(state.window_start).as_secs() >= state.window_seconds {
-                    state.current_requests = 0;
-                    state.window_start = now;
+                let (mut current_requests, window_start, window_seconds, rate) = {
+                    let state = state.read().await;
+                    (state.current_requests, state.window_start, state.window_seconds, state.rate)
+                };
+            
+                let elapsed = now.duration_since(window_start).as_secs();
+                if elapsed >= window_seconds {
+                    current_requests = 0;
                 }
-                if state.current_requests < state.rate {
-                    state.current_requests += 1;
-                    true
+            
+                let should_allow = if current_requests < rate {
+                    current_requests + 1
                 } else {
-                    false
+                    current_requests
+                };
+            
+                {
+                    let mut state = state.write().await;
+                    if elapsed >= window_seconds {
+                        state.window_start = now;
+                    }
+                    state.current_requests = should_allow;
                 }
+            
+                should_allow <= rate
             }
+            
             RateLimiter::SlidingLog(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
