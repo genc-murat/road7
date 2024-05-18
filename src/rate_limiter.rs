@@ -31,6 +31,19 @@ pub enum RateLimiterConfig {
         window_seconds: u64,
         header_key: Option<String>,
     },
+    Quota {
+        quota: u64,
+        period_seconds: u64,
+        header_key: Option<String>,
+    },
+    Dynamic {
+        initial_rate: u64,
+        max_rate: u64,
+        min_rate: u64,
+        adjust_factor: f64,
+        window_seconds: u64,
+        header_key: Option<String>,
+    },
 }
 
 impl Default for RateLimiterConfig {
@@ -50,6 +63,8 @@ pub enum RateLimiter {
     FixedWindow(RwLock<FixedWindowState>, String),
     SlidingLog(RwLock<SlidingLogState>, String),
     SlidingWindow(RwLock<SlidingWindowState>, String),
+    Quota(RwLock<QuotaState>, String),
+    Dynamic(RwLock<DynamicState>, String),
 }
 
 #[derive(Debug)]
@@ -81,6 +96,24 @@ struct SlidingWindowState {
     window_start: Instant,
     rate: u64,
     window_seconds: u64,
+}
+
+#[derive(Debug)]
+struct QuotaState {
+    remaining_quota: u64,
+    reset_time: Instant,
+    quota: u64,
+    period_seconds: u64,
+}
+
+#[derive(Debug)]
+struct DynamicState {
+    current_rate: u64,
+    last_adjusted: Instant,
+    adjust_factor: f64,
+    window_seconds: u64,
+    min_rate: u64,
+    max_rate: u64,
 }
 
 impl RateLimiter {
@@ -162,6 +195,43 @@ impl RateLimiter {
                     window_key,
                 )
             }
+            RateLimiterConfig::Quota {
+                quota,
+                period_seconds,
+                header_key: _,
+            } => {
+                let quota_key = format!("Quota{}", key_suffix);
+                RateLimiter::Quota(
+                    RwLock::new(QuotaState {
+                        remaining_quota: *quota,
+                        reset_time: Instant::now() + Duration::from_secs(*period_seconds),
+                        quota: *quota,
+                        period_seconds: *period_seconds,
+                    }),
+                    quota_key,
+                )
+            }
+            RateLimiterConfig::Dynamic {
+                initial_rate,
+                max_rate,
+                min_rate,
+                adjust_factor,
+                window_seconds,
+                header_key: _,
+            } => {
+                let dynamic_key = format!("Dynamic{}", key_suffix);
+                RateLimiter::Dynamic(
+                    RwLock::new(DynamicState {
+                        current_rate: *initial_rate,
+                        last_adjusted: Instant::now(),
+                        adjust_factor: *adjust_factor,
+                        window_seconds: *window_seconds,
+                        min_rate: *min_rate,
+                        max_rate: *max_rate,
+                    }),
+                    dynamic_key,
+                )
+            }
         }
     }
 
@@ -188,8 +258,7 @@ impl RateLimiter {
                 let now = Instant::now();
                 let elapsed = now.duration_since(state.last_refill).as_secs_f64();
                 let leaked_tokens = (state.leak_rate as f64 * elapsed).floor() as u64;
-                state.tokens =
-                    state.tokens.saturating_add(leaked_tokens).min(state.bucket_size);
+                state.tokens = state.tokens.saturating_add(leaked_tokens).min(state.bucket_size);
                 state.last_refill = now;
                 if state.tokens > 0 {
                     state.tokens -= 1;
@@ -202,7 +271,6 @@ impl RateLimiter {
                 let mut state = state.write().await;
                 let now = Instant::now();
                 if now.duration_since(state.window_start).as_secs() >= state.window_seconds {
-
                     state.current_requests = 0;
                     state.window_start = now;
                 }
@@ -217,7 +285,6 @@ impl RateLimiter {
                 let mut state = state.write().await;
                 let now = Instant::now();
                 let window_start = now - Duration::from_secs(state.window_seconds);
-
                 state.requests.retain(|&t| t >= window_start);
                 if state.requests.len() < state.rate as usize {
                     state.requests.push(now);
@@ -229,14 +296,42 @@ impl RateLimiter {
             RateLimiter::SlidingWindow(state, _) => {
                 let mut state = state.write().await;
                 let now = Instant::now();
-                let window_end =
-                    state.window_start + Duration::from_secs(state.window_seconds);
+                let window_end = state.window_start + Duration::from_secs(state.window_seconds);
                 if now >= window_end {
                     state.window_start = now;
                     state.current_requests = 1;
                     true
                 } else if state.current_requests < state.rate {
                     state.current_requests += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            RateLimiter::Quota(state, _) => {
+                let mut state = state.write().await;
+                let now = Instant::now();
+                if now >= state.reset_time {
+                    state.reset_time = now + Duration::from_secs(state.period_seconds);
+                    state.remaining_quota = state.quota;
+                }
+                if state.remaining_quota > 0 {
+                    state.remaining_quota -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            RateLimiter::Dynamic(state, _) => {
+                let mut state = state.write().await;
+                let now = Instant::now();
+                if now.duration_since(state.last_adjusted).as_secs() >= state.window_seconds {
+                    state.current_rate = (state.current_rate as f64 * state.adjust_factor)
+                        .clamp(state.min_rate as f64, state.max_rate as f64) as u64;
+                    state.last_adjusted = now;
+                }
+                if state.current_rate > 0 {
+                    state.current_rate -= 1;
                     true
                 } else {
                     false

@@ -143,9 +143,6 @@ struct SecurityHeadersConfig {
     feature_policy: Option<String>,
 }
 
-
-
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CacheConfig {
     ttl_seconds: u64,
@@ -357,7 +354,6 @@ async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     Ok(())
 }
 
-
 async fn apply_security_headers(headers: &mut HeaderMap, security_headers_config: &Option<SecurityHeadersConfig>) {
     if let Some(config) = security_headers_config.as_ref() {
         insert_header(headers, STRICT_TRANSPORT_SECURITY, &config.strict_transport_security);
@@ -395,7 +391,6 @@ fn insert_header(headers: &mut HeaderMap, header_name: HeaderName, header_value:
         headers.insert(header_name, HeaderValue::from_str(value).unwrap());
     }
 }
-
 
 struct ProxyState {
     target_map: DashMap<
@@ -693,7 +688,9 @@ where
             RateLimiterConfig::LeakyBucket { header_key, .. } |
             RateLimiterConfig::FixedWindow { header_key, .. } |
             RateLimiterConfig::SlidingLog { header_key, .. } |
-            RateLimiterConfig::SlidingWindow { header_key, .. } => {
+            RateLimiterConfig::SlidingWindow { header_key, .. } |
+            RateLimiterConfig::Quota { header_key, .. } |
+            RateLimiterConfig::Dynamic { header_key, .. } => {
                 header_key.as_deref()
             }
         };
