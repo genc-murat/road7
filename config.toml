@@ -54,6 +54,7 @@ timeout_seconds = 3
 rate_limiter_config = { TokenBucket = { refill_rate = 2, burst_capacity = 5, header_key = "Client-ID" } }
 cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
 logging_config = { log_requests = true, log_responses = true }
+authentication = {jwt_secret = "your_secret_key",type = "JWT" }
 
 
 [[targets]]

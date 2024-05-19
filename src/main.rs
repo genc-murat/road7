@@ -1,9 +1,16 @@
+mod auth {
+    pub mod jwt;
+    pub mod basic;
+}
+
 mod retry;
 mod rate_limiter;
 mod transform;
 mod error;
 mod circuit_breaker;
 
+use crate::auth::jwt::validate_jwt;
+use crate::auth::basic::validate_basic;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use error::ProxyError;
 use retry::{RetryConfig, RetryStrategy};
@@ -88,28 +95,32 @@ fn default_worker_threads() -> usize {
 struct Target {
     path: String,
     url: String,
-    #[serde(default)]
+    authentication: Option<AuthenticationConfig>,
     retries: Option<RetryConfig>,
-    #[serde(default)]
     request_transforms: Option<Vec<Transform>>,
-    #[serde(default)]
     response_transforms: Option<Vec<Transform>>,
-    #[serde(default)]
     circuit_breaker_config: Option<CircuitBreakerConfig>,
-    #[serde(default)]
     rate_limiter_config: Option<RateLimiterConfig>,
-    #[serde(default)]
     routing_header: Option<String>,
-    #[serde(default)]
     routing_values: Option<HashMap<String, String>>,
-    #[serde(default)]
     timeout_seconds: Option<u64>,
-    #[serde(default)]
     cache_config: Option<CacheConfig>,
-    #[serde(default)]
     logging_config: Option<LoggingConfig>,
-    #[serde(default)]
     cors_config: Option<CorsConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct AuthenticationConfig {
+    #[serde(rename = "type")]
+    auth_type: AuthenticationType,
+    jwt_secret: Option<String>,
+    basic_users: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+enum AuthenticationType {
+    JWT,
+    Basic,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -395,6 +406,7 @@ struct ProxyState {
         String,
         (
             String,
+            Option<AuthenticationConfig>,
             Option<RetryConfig>,
             Option<Vec<Transform>>,
             Option<Vec<Transform>>,
@@ -402,8 +414,8 @@ struct ProxyState {
             Option<RateLimiterConfig>,
             Option<String>,
             Option<HashMap<String, String>>,
-            Option<u64>,
             Option<CacheConfig>,
+            Option<u64>,
             Option<LoggingConfig>,
             Option<CorsConfig>,
         ),
@@ -447,7 +459,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let caches = initial_target_map.iter()
         .filter_map(|entry| {
-            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _, _)) = entry.pair();
+            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _, _, _)) = entry.pair();
             cache_config.as_ref().map(|config| {
                 (path.clone(), Cache::new(config))
             })
@@ -531,6 +543,7 @@ fn build_target_map(
     String,
     (
         String,
+        Option<AuthenticationConfig>,
         Option<RetryConfig>,
         Option<Vec<Transform>>,
         Option<Vec<Transform>>,
@@ -538,8 +551,8 @@ fn build_target_map(
         Option<RateLimiterConfig>,
         Option<String>,
         Option<HashMap<String, String>>,
-        Option<u64>,
         Option<CacheConfig>,
+        Option<u64>,
         Option<LoggingConfig>,
         Option<CorsConfig>,
     ),
@@ -550,6 +563,7 @@ fn build_target_map(
             target.path.clone(),
             (
                 target.url.clone(),
+                target.authentication.clone(),
                 target.retries.clone(),
                 target.request_transforms.clone(),
                 target.response_transforms.clone(),
@@ -557,8 +571,8 @@ fn build_target_map(
                 target.rate_limiter_config.clone(),
                 target.routing_header.clone(),
                 target.routing_values.clone(),
-                target.timeout_seconds,
                 target.cache_config.clone(),
+                target.timeout_seconds,
                 target.logging_config.clone(),
                 target.cors_config.clone(),
             ),
@@ -605,6 +619,7 @@ where
     let (
         target_url,
         target_url_len,
+        auth_config,
         retry_strategy,
         request_transforms,
         response_transforms,
@@ -621,6 +636,28 @@ where
             return Ok(ProxyError::NotFound("No target found for the given path".to_string()).into());
         }
     };
+
+    // Kimlik doğrulama kontrolü
+    if let Some(auth_config) = auth_config {
+        match auth_config.auth_type {
+            AuthenticationType::JWT => {
+                if let Some(secret) = &auth_config.jwt_secret {
+                    if let Err(err) = validate_jwt(&original_req, secret).await {
+                        error!(request_id = %request_id, "JWT validation failed: {}", err);
+                        return Ok(ProxyError::Unauthorized(err).into());
+                    }
+                }
+            },
+            AuthenticationType::Basic => {
+                if let Some(users) = &auth_config.basic_users {
+                    if let Err(err) = validate_basic(&original_req, users).await {
+                        error!(request_id = %request_id, "Basic auth validation failed: {}", err);
+                        return Ok(ProxyError::Unauthorized(err).into());
+                    }
+                }
+            },
+        }
+    }
 
     if let Some(config) = &logging_config {
         if config.log_requests {
@@ -881,6 +918,7 @@ fn find_target(
 ) -> Option<(
     String,
     usize,
+    Option<AuthenticationConfig>,
     Box<dyn RetryStrategy>,
     Option<Vec<Transform>>,
     Option<Vec<Transform>>,
@@ -896,6 +934,7 @@ fn find_target(
     for entry in target_map.iter() {
         let (p, (
             url,
+            auth_config,
             retries,
             req_transforms,
             resp_transforms,
@@ -903,8 +942,8 @@ fn find_target(
             rate_limiter_config,
             routing_header,
             routing_values,
-            t_timeout,
             cache_config,
+            t_timeout,
             log_config,
             cors_config,
         )) = entry.pair();
@@ -918,6 +957,7 @@ fn find_target(
                         target = Some((
                             target_url.clone(),
                             p.len(),
+                            auth_config.clone(),
                             retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
                             req_transforms.clone(),
                             resp_transforms.clone(),
@@ -935,6 +975,7 @@ fn find_target(
                 target = Some((
                     url.clone(),
                     p.len(),
+                    auth_config.clone(),
                     retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
                     req_transforms.clone(),
                     resp_transforms.clone(),
@@ -992,7 +1033,6 @@ fn rebuild_request(
         .body(Body::empty())
         .expect("Failed to rebuild request")
 }
-
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
     Transform::apply_request_transforms(req, transforms);

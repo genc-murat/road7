@@ -1,6 +1,5 @@
 use hyper::{Body, Response, StatusCode};
 use thiserror::Error;
-
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("Service Unavailable: Circuit Breaker is Open")]
@@ -17,6 +16,8 @@ pub enum ProxyError {
     NotFound(String),
     #[error("Service Unavailable: {0}")]
     ServiceUnavailable(String),
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl From<ProxyError> for Response<Body> {
@@ -48,6 +49,10 @@ impl From<ProxyError> for Response<Body> {
                 .unwrap(),
             ProxyError::ServiceUnavailable(_) => Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+            ProxyError::Unauthorized(_) => Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from(error.to_string()))
                 .unwrap(),
         }
