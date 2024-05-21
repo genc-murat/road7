@@ -1053,6 +1053,7 @@ dependencies = [
  "regex",
  "rustls 0.20.9",
  "serde 1.0.201",
+ "serde_derive",
  "serde_json",
  "thiserror",
  "tokio",
