@@ -1017,34 +1017,32 @@ fn rebuild_request(
         .version(original_req.version());
     
     if let Some(headers) = builder.headers_mut() {
-        headers.extend(
-            original_req.headers()
-                .iter()
-                .filter(|(key, _)| *key != USER_AGENT)
-                .map(|(key, value)| (key.clone(), value.clone()))
-        );
+        // Forward only the necessary headers
+        for (key, value) in original_req.headers().iter() {
+            if key != HOST && key != USER_AGENT && key != "X-Forwarded-For" {
+                headers.insert(key.clone(), value.clone());
+            }
+        }
         
         if let Some(auth) = authority {
             headers.insert(HOST, HeaderValue::from_str(&auth).unwrap());
         }
         
-        // Add the X-Forwarded-For header
-        if let Some(client_ip) = original_req.headers().get("X-Forwarded-For") {
-            let mut x_forwarded_for = client_ip.to_str().unwrap_or_default().to_string();
-            if let Some(peer_addr) = original_req.extensions().get::<SocketAddr>() {
-                x_forwarded_for.push_str(", ");
-                x_forwarded_for.push_str(&peer_addr.ip().to_string());
-            }
-            headers.insert("X-Forwarded-For", HeaderValue::from_str(&x_forwarded_for).unwrap());
-        } else if let Some(peer_addr) = original_req.extensions().get::<SocketAddr>() {
-            headers.insert("X-Forwarded-For", HeaderValue::from_str(&peer_addr.ip().to_string()).unwrap());
-        }
+        // Add a custom header to indicate the request passed through the proxy
+        headers.insert("X-Proxy", HeaderValue::from_static("road7"));
+    }
+    
+    // Rebuild the request body
+    let mut new_body = Body::empty();
+    if let Ok(body_bytes) = hyper::body::to_bytes(original_req.body_mut()).await {
+        new_body = Body::from(body_bytes);
     }
     
     builder
-        .body(Body::empty())
+        .body(new_body)
         .expect("Failed to rebuild request")
 }
+
 
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
