@@ -1027,12 +1027,25 @@ fn rebuild_request(
         if let Some(auth) = authority {
             headers.insert(HOST, HeaderValue::from_str(&auth).unwrap());
         }
+        
+        // Add the X-Forwarded-For header
+        if let Some(client_ip) = original_req.headers().get("X-Forwarded-For") {
+            let mut x_forwarded_for = client_ip.to_str().unwrap_or_default().to_string();
+            if let Some(peer_addr) = original_req.extensions().get::<SocketAddr>() {
+                x_forwarded_for.push_str(", ");
+                x_forwarded_for.push_str(&peer_addr.ip().to_string());
+            }
+            headers.insert("X-Forwarded-For", HeaderValue::from_str(&x_forwarded_for).unwrap());
+        } else if let Some(peer_addr) = original_req.extensions().get::<SocketAddr>() {
+            headers.insert("X-Forwarded-For", HeaderValue::from_str(&peer_addr.ip().to_string()).unwrap());
+        }
     }
     
     builder
         .body(Body::empty())
         .expect("Failed to rebuild request")
 }
+
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
     Transform::apply_request_transforms(req, transforms);
