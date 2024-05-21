@@ -771,7 +771,7 @@ where
     let mut retries = 0;
     let max_attempts = retry_strategy.max_attempts();
     while retries < max_attempts {
-        let mut req = rebuild_request(&original_req, &target_url, target_url_len);
+        let mut req = rebuild_request(&mut original_req, &target_url, target_url_len).await;
         if let Some(ref transforms) = request_transforms {
             apply_request_transforms(&mut req, transforms);
         }
@@ -993,8 +993,8 @@ fn find_target(
     target
 }
 
-fn rebuild_request(
-    original_req: &Request<Body>,
+async fn rebuild_request(
+    original_req: &mut Request<Body>,
     target_url: &str,
     target_url_len: usize,
 ) -> Request<Body> {
@@ -1033,16 +1033,13 @@ fn rebuild_request(
     }
     
     // Rebuild the request body
-    let mut new_body = Body::empty();
-    if let Ok(body_bytes) = hyper::body::to_bytes(original_req.body_mut()).await {
-        new_body = Body::from(body_bytes);
-    }
+    let body_bytes = hyper::body::to_bytes(original_req.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
+    let new_body = Body::from(body_bytes);
     
     builder
         .body(new_body)
         .expect("Failed to rebuild request")
 }
-
 
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
