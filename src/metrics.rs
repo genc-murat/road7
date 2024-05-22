@@ -1,4 +1,4 @@
-mod metrics {
+
     use prometheus::{Encoder, IntCounter, IntGauge, Opts, Registry, TextEncoder};
 
     #[derive(Clone)]
@@ -35,4 +35,4 @@ mod metrics {
             String::from_utf8(buffer).unwrap()
         }
     }
-}
+
