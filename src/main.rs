@@ -611,8 +611,13 @@ where
 
     if let Err(validation_error) = validate_request(&mut original_req).await {
         error!(request_id = %request_id, "Request validation failed: {}", validation_error);
+        proxy_state.metrics.failed_requests.inc();
+        proxy_state.metrics.error_counts.with_label_values(&["validation_error"]).inc();
         return Ok(ProxyError::BadRequest(validation_error).into());
     }
+
+    let request_size = hyper::body::to_bytes(original_req.body_mut()).await.unwrap().len();
+    proxy_state.metrics.request_size_bytes.observe(request_size as f64);
 
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
@@ -638,6 +643,11 @@ where
 
     info!(request_id = %request_id, "Handling request for path: {}", path);
 
+    proxy_state.metrics.http_requests_total.inc();
+    proxy_state.metrics.ongoing_requests.inc();
+
+    let start_time = Instant::now();
+
     let (
         target_url,
         target_url_len,
@@ -655,6 +665,8 @@ where
         Some(t) => t,
         None => {
             error!(request_id = %request_id, "No target found for path: {}", path);
+            proxy_state.metrics.failed_requests.inc();
+            proxy_state.metrics.error_counts.with_label_values(&["no_target"]).inc();
             return Ok(ProxyError::NotFound("No target found for the given path".to_string()).into());
         }
     };
@@ -666,6 +678,8 @@ where
                 if let Some(secret) = &auth_config.jwt_secret {
                     if let Err(err) = validate_jwt(&original_req, secret).await {
                         error!(request_id = %request_id, "JWT validation failed: {}", err);
+                        proxy_state.metrics.failed_requests.inc();
+                        proxy_state.metrics.error_counts.with_label_values(&["auth_error"]).inc();
                         return Ok(ProxyError::Unauthorized(err).into());
                     }
                 }
@@ -674,6 +688,8 @@ where
                 if let Some(users) = &auth_config.basic_users {
                     if let Err(err) = validate_basic(&original_req, users).await {
                         error!(request_id = %request_id, "Basic auth validation failed: {}", err);
+                        proxy_state.metrics.failed_requests.inc();
+                        proxy_state.metrics.error_counts.with_label_values(&["auth_error"]).inc();
                         return Ok(ProxyError::Unauthorized(err).into());
                     }
                 }
@@ -696,6 +712,8 @@ where
                 let vary_headers = cache_entry.vary_headers.clone();
                 let new_cache_key = create_cache_key(&target_url, &original_req, vary_headers.as_ref());
                 if let Some(entry) = cache.get(&new_cache_key).await {
+                    let response_size = entry.response.len();
+                    proxy_state.metrics.response_size_bytes.observe(response_size as f64);
                     let mut response = Response::builder()
                         .status(entry.status)
                         .body(Body::from(entry.response.clone()))
@@ -721,6 +739,10 @@ where
                             info!(request_id = %request_id, "Outgoing response (from cache): {:?}", response);
                         }
                     }
+
+                    proxy_state.metrics.http_responses_total.inc();
+                    proxy_state.metrics.successful_requests.inc();
+                    proxy_state.metrics.request_duration_seconds.observe(start_time.elapsed().as_secs_f64());
 
                     return Ok(response);
                 }
