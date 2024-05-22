@@ -9,9 +9,12 @@ mod transform;
 mod error;
 mod circuit_breaker;
 mod metrics;
+mod cache;
 
+use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
+use cache::CorsConfig;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
@@ -129,17 +132,6 @@ enum AuthenticationType {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct CorsConfig {
-    enabled: bool,
-    #[serde(rename = "Access-Control-Allow-Origin")]
-    allow_origin: Option<String>,
-    #[serde(rename = "Access-Control-Allow-Headers")]
-    allow_headers: Option<String>,
-    #[serde(rename = "Access-Control-Allow-Methods")]
-    allow_methods: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 struct LoggingConfig {
     log_requests: bool,
     log_responses: bool,
@@ -157,36 +149,8 @@ struct SecurityHeadersConfig {
     feature_policy: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct CacheConfig {
-    ttl_seconds: u64,
-    max_size: usize,
-    #[serde(default = "default_serialize")]
-    serialize: bool,
-}
 
-fn default_serialize() -> bool {
-    false
-}
 
-#[derive(Debug, Clone)]
-struct Cache {
-    entries: Arc<DashMap<String, CacheEntry>>,
-    ttl: Duration,
-    serialize: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CacheEntry {
-    response: Vec<u8>,
-    headers: HeaderMap,
-    status: StatusCode,
-    expires_at: Instant,
-    cors_headers: Option<CorsHeaders>,
-    etag: Option<String>,
-    last_modified: Option<String>,
-    vary_headers: Option<Vec<String>>,
-}
 
 #[derive(Debug, Clone)]
 struct CorsHeaders {
@@ -195,128 +159,6 @@ struct CorsHeaders {
     allow_methods: HeaderValue,
 }
 
-impl CacheEntry {
-    async fn from_response(response: &mut Response<Body>, cors_config: &Option<CorsConfig>) -> Self {
-        let headers = response.headers().clone();
-        let status = response.status();
-        let cors_headers = cors_config.as_ref().map(|config| {
-            CorsHeaders {
-                allow_origin: HeaderValue::from_str(config.allow_origin.as_deref().unwrap_or("*")).unwrap(),
-                allow_headers: HeaderValue::from_str(config.allow_headers.as_deref().unwrap_or("*")).unwrap(),
-                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
-            }
-        });
-
-        let body_bytes = to_bytes(response.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
-
-        let etag = headers.get("ETag").map(|v| v.to_str().unwrap().to_string()).or_else(|| {
-            let hash = format!("{:x}", md5::compute(&body_bytes));
-            Some(format!("\"{}\"", hash))
-        });
-
-        let last_modified = headers.get("Last-Modified").map(|v| v.to_str().unwrap().to_string());
-
-        let vary_headers = headers.get(VARY)
-            .and_then(|header| header.to_str().ok())
-            .map(|header_value| header_value.split(',').map(|s| s.trim().to_string()).collect());
-
-        Self {
-            response: body_bytes.to_vec(),
-            headers,
-            status,
-            expires_at: Instant::now(),
-            cors_headers,
-            etag,
-            last_modified,
-            vary_headers,
-        }
-    }
-}
-
-impl Cache {
-    fn new(config: &CacheConfig) -> Self {
-        let cache = Self {
-            entries: Arc::new(DashMap::new()),
-            ttl: Duration::from_secs(config.ttl_seconds),
-            serialize: config.serialize,
-        };
-
-        let cache_clone = cache.clone();
-        tokio::spawn(async move {
-            loop {
-                cache_clone.clean_expired_entries().await;
-                sleep(Duration::from_secs(60)).await;
-            }
-        });
-
-        cache
-    }
-
-    async fn get(&self, key: &str) -> Option<CacheEntry> {
-        if let Some(entry) = self.entries.get(key) {
-            if entry.expires_at > Instant::now() {
-                info!("Cache hit for key: {}", key);
-                return Some(entry.clone());
-            } else {
-                warn!("Cache entry expired for key: {}", key);
-                self.remove_expired(key).await;
-            }
-        }
-        info!("Cache miss for key: {}", key);
-        None
-    }
-
-    async fn put(&self, key: String, response: CacheEntry) {
-        let entry = CacheEntry {
-            response: if self.serialize {
-                serde_json::to_vec(&response.response).unwrap_or_else(|_| response.response.clone())
-            } else {
-                response.response
-            },
-            headers: response.headers.clone(),
-            status: response.status,
-            expires_at: Instant::now() + self.ttl,
-            cors_headers: response.cors_headers.clone(),
-            etag: response.etag.clone(),
-            last_modified: response.last_modified.clone(),
-            vary_headers: response.vary_headers.clone(),
-        };
-        self.entries.insert(key.clone(), entry);
-        info!("Cache updated for key: {}", key);
-    }
-
-    async fn remove_expired(&self, key: &str) {
-        self.entries.remove(key);
-        warn!("Cache entry removed for key: {}", key);
-    }
-
-    async fn clean_expired_entries(&self) {
-        let now = Instant::now();
-        let keys_to_remove: Vec<String> = self.entries.iter()
-            .filter(|entry| entry.value().expires_at <= now)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.remove_expired(&key).await;
-        }
-    }
-}
-
-fn create_cache_key(target_url: &str, req: &Request<Body>, vary_headers: Option<&Vec<String>>) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    target_url.hash(&mut hasher);
-    req.uri().to_string().hash(&mut hasher);
-    if let Some(headers) = vary_headers {
-        for header_name in headers {
-            if let Some(value) = req.headers().get(header_name) {
-                header_name.hash(&mut hasher);
-                value.hash(&mut hasher);
-            }
-        }
-    }
-    format!("{:x}", hasher.finish())
-}
 
 async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let uri = req.uri().to_string();
