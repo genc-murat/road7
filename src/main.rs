@@ -514,6 +514,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
                         metrics.http_requests_total.inc(); // Increment the request count
                         proxy_state.metrics.ongoing_requests.inc(); // Increment ongoing requests
+                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc(); // Increment HTTP method count
                         let response = proxy_request(
                             req,
                             Arc::clone(&proxy_state),
