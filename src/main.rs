@@ -28,7 +28,7 @@ use security_headers::SecurityHeadersConfig;
 use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
-use hyper::header::{HeaderValue, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS, CONTENT_SECURITY_POLICY, X_XSS_PROTECTION, REFERRER_POLICY, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, USER_AGENT, HOST, VARY};
+use hyper::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, HOST};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
@@ -43,12 +43,9 @@ use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
 use tracing_appender::non_blocking;
-use std::hash::{Hash, Hasher};
+
 use dashmap::DashMap;
-use http::header::{HeaderMap, HeaderName};
-use regex::Regex;
-use ammonia::clean;
-use hyper::body::to_bytes;
+
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
