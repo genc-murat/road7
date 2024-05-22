@@ -62,6 +62,8 @@ struct ProxyConfig {
     default_rate_limiter_config: Option<RateLimiterConfig>,
     #[serde(default)]
     security_headers_config: Option<SecurityHeadersConfig>,
+    #[serde(default)]
+    default_cors_config: Option<CorsConfig>, 
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -428,6 +430,7 @@ struct ProxyState {
     concurrency_limiter: Arc<Semaphore>,
     ongoing_requests: Arc<AtomicUsize>,
     metrics: Arc<metrics::Metrics>, 
+    default_cors_config: Option<CorsConfig>,
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -445,6 +448,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
     let security_headers_config = Arc::new(config.security_headers_config.clone());
+    let default_cors_config = config.default_cors_config.clone(); // Yeni eklenen satır
 
     let mut http_connector = HttpConnector::new();
     if let Some(recv_buffer_size) = config.server.recv_buffer_size {
@@ -479,7 +483,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         caches,
         concurrency_limiter: concurrency_limiter.clone(),
         ongoing_requests: ongoing_requests.clone(),
-        metrics: metrics.clone(), // Add metrics to ProxyState
+        metrics: metrics.clone(),
+        default_cors_config, // Yeni eklenen satır
     });
 
     let make_svc = {
@@ -550,6 +555,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
+
+
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
@@ -889,7 +896,9 @@ where
                             }
                         }
 
-                        if let Some(cors_config) = &cors_config {
+                        // CORS yapılandırması
+                        let cors_config = cors_config.or_else(|| proxy_state.default_cors_config.clone());
+                        if let Some(cors_config) = cors_config {
                             if cors_config.enabled {
                                 if let Some(allow_origin) = &cors_config.allow_origin {
                                     resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_str(allow_origin).unwrap());
@@ -953,6 +962,7 @@ where
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
+
 
 fn find_target(
     proxy_state: &Arc<ProxyState>,
