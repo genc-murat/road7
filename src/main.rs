@@ -14,6 +14,7 @@ use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use error::ProxyError;
+use hyper::server::conn::AddrStream;
 use retry::{RetryConfig, RetryStrategy};
 use rate_limiter::{RateLimiter, RateLimiterConfig};
 use transform::Transform;
@@ -448,7 +449,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let default_timeout_seconds = config.default_timeout_seconds;
     let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
     let security_headers_config = Arc::new(config.security_headers_config.clone());
-    let default_cors_config = config.default_cors_config.clone(); // Yeni eklenen satır
+    let default_cors_config = config.default_cors_config.clone();
 
     let mut http_connector = HttpConnector::new();
     if let Some(recv_buffer_size) = config.server.recv_buffer_size {
@@ -484,7 +485,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         concurrency_limiter: concurrency_limiter.clone(),
         ongoing_requests: ongoing_requests.clone(),
         metrics: metrics.clone(),
-        default_cors_config, // Yeni eklenen satır
+        default_cors_config,
     });
 
     let make_svc = {
@@ -496,7 +497,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         let security_headers_config = Arc::clone(&security_headers_config);
         let metrics = metrics.clone();
 
-        make_service_fn(move |_| {
+        make_service_fn(move |conn: &AddrStream| {
             let proxy_state = Arc::clone(&proxy_state);
             let retry_config = Arc::clone(&retry_config);
             let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
@@ -504,6 +505,8 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             let client = client.clone();
             let security_headers_config = Arc::clone(&security_headers_config);
             let metrics = metrics.clone();
+
+            let client_ip = conn.remote_addr();
 
             async move {
                 Ok::<_, Infallible>(service_fn(move |req| {
@@ -522,6 +525,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                         metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc(); // Increment HTTP method count
                         let response = proxy_request(
                             req,
+                            client_ip,
                             Arc::clone(&proxy_state),
                             retry_config,
                             default_circuit_breaker_config,
@@ -555,6 +559,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
+
 
 
 fn build_target_map(
@@ -603,6 +608,7 @@ fn build_target_map(
 
 async fn proxy_request<C>(
     mut original_req: Request<Body>,
+    client_ip: SocketAddr,
     proxy_state: Arc<ProxyState>,
     default_retry_config: Arc<RetryConfig>,
     default_circuit_breaker_config: Arc<CircuitBreakerConfig>,
@@ -823,7 +829,7 @@ where
     let mut retries = 0;
     let max_attempts = retry_strategy.max_attempts();
     while retries < max_attempts {
-        let mut req = rebuild_request(&mut original_req, &target_url, target_url_len).await;
+        let mut req = rebuild_request(&mut original_req, &target_url, target_url_len, client_ip).await;
         if let Some(ref transforms) = request_transforms {
             apply_request_transforms(&mut req, transforms);
         }
@@ -964,6 +970,7 @@ where
 }
 
 
+
 fn find_target(
     proxy_state: &Arc<ProxyState>,
     path: &str,
@@ -1052,45 +1059,56 @@ async fn rebuild_request(
     original_req: &mut Request<Body>,
     target_url: &str,
     target_url_len: usize,
+    client_ip: SocketAddr,
 ) -> Request<Body> {
     let path = original_req.uri().path();
     let query = original_req.uri().query().unwrap_or_default();
     let new_path = &path[target_url_len..];
-    
+
     let uri_string = if query.is_empty() {
         format!("{}{}", target_url, new_path)
     } else {
         format!("{}{}?{}", target_url, new_path, query)
     };
     let uri = uri_string.parse::<Uri>().expect("Invalid URI");
-    
+
     let authority = uri.authority().map(|auth| auth.to_string());
-    
+
     let mut builder = Request::builder()
         .method(original_req.method())
         .uri(uri)
         .version(original_req.version());
-    
+
     if let Some(headers) = builder.headers_mut() {
-        // Forward only the necessary headers
+        // Forward all headers, including X-Forwarded-For
         for (key, value) in original_req.headers().iter() {
-            if key != HOST && key != USER_AGENT && key != "X-Forwarded-For" {
-                headers.insert(key.clone(), value.clone());
-            }
+            headers.insert(key.clone(), value.clone());
         }
-        
+
+        // Update or set X-Forwarded-For header
+        let client_ip = client_ip.ip().to_string();
+
+        let x_forwarded_for = original_req
+            .headers()
+            .get("X-Forwarded-For")
+            .and_then(|header| header.to_str().ok())
+            .map(|existing| format!("{}, {}", existing, client_ip))
+            .unwrap_or_else(|| client_ip.to_string());
+
+        headers.insert("X-Forwarded-For", HeaderValue::from_str(&x_forwarded_for).unwrap());
+
         if let Some(auth) = authority {
             headers.insert(HOST, HeaderValue::from_str(&auth).unwrap());
         }
-        
+
         // Add a custom header to indicate the request passed through the proxy
         headers.insert("X-Proxy", HeaderValue::from_static("road7"));
     }
-    
+
     // Rebuild the request body
     let body_bytes = hyper::body::to_bytes(original_req.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
     let new_body = Body::from(body_bytes);
-    
+
     builder
         .body(new_body)
         .expect("Failed to rebuild request")
