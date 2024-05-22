@@ -12,8 +12,10 @@ mod metrics;
 mod cache;
 mod validate;
 mod security_headers;
+mod load_balancer;
 
 use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
+use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
 use crate::security_headers::apply_security_headers;
@@ -50,6 +52,7 @@ use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
 use tokio::task::spawn_blocking;
+use std::sync::Mutex;
 
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -68,6 +71,7 @@ struct ProxyConfig {
     security_headers_config: Option<SecurityHeadersConfig>,
     #[serde(default)]
     default_cors_config: Option<CorsConfig>, 
+    load_balancer: Option<LoadBalancerConfig>, // Load Balancer Konfigürasyonu
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -102,7 +106,7 @@ fn default_worker_threads() -> usize {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Target {
     path: String,
-    url: String,
+    urls: Vec<String>, // Birden fazla URL
     authentication: Option<AuthenticationConfig>,
     retries: Option<RetryConfig>,
     request_transforms: Option<Vec<Transform>>,
@@ -141,7 +145,7 @@ struct ProxyState {
     target_map: DashMap<
         String,
         (
-            String,
+            Vec<String>, // URL listesi
             Option<AuthenticationConfig>,
             Option<RetryConfig>,
             Option<Vec<Transform>>,
@@ -163,6 +167,7 @@ struct ProxyState {
     ongoing_requests: Arc<AtomicUsize>,
     metrics: Arc<metrics::Metrics>, 
     default_cors_config: Option<CorsConfig>,
+    load_balancer: Option<Arc<RwLock<LoadBalancer>>>, // Load Balancer durumu
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -208,6 +213,13 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         })
         .collect::<DashMap<_, _>>();
 
+    let load_balancer = config.load_balancer.as_ref().map(|lb_config| {
+        Arc::new(RwLock::new(LoadBalancer::new(
+            config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
+            lb_config.algorithm.clone()
+        )))
+    });
+
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
         circuit_breakers: DashMap::new(),
@@ -217,6 +229,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         ongoing_requests: ongoing_requests.clone(),
         metrics: metrics.clone(),
         default_cors_config,
+        load_balancer,
     });
 
     let make_svc = {
@@ -291,14 +304,12 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     graceful.await.map_err(Into::into)
 }
 
-
-
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
     String,
     (
-        String,
+        Vec<String>, // URL listesi
         Option<AuthenticationConfig>,
         Option<RetryConfig>,
         Option<Vec<Transform>>,
@@ -318,7 +329,7 @@ fn build_target_map(
         map.insert(
             target.path.clone(),
             (
-                target.url.clone(),
+                target.urls.clone(),
                 target.authentication.clone(),
                 target.retries.clone(),
                 target.request_transforms.clone(),
@@ -394,7 +405,7 @@ where
     let start_time = Instant::now();
 
     let (
-        target_url,
+        target_urls,
         target_url_len,
         auth_config,
         retry_strategy,
@@ -448,14 +459,14 @@ where
         }
     }
 
-    let cache_key = create_cache_key(&target_url, &original_req, None);
+    let cache_key = create_cache_key(&target_urls[0], &original_req, None);
 
     if let Some(cache_config) = &target_cache_config {
         if let Some(cache) = proxy_state.caches.get(&cache_key) {
             if let Some(cache_entry) = cache.get(&cache_key).await {
                 info!(request_id = %request_id, "Cache hit for: {}", cache_key);
                 let vary_headers = cache_entry.vary_headers.clone();
-                let new_cache_key = create_cache_key(&target_url, &original_req, vary_headers.as_ref());
+                let new_cache_key = create_cache_key(&target_urls[0], &original_req, vary_headers.as_ref());
                 if let Some(entry) = cache.get(&new_cache_key).await {
                     let response_size = entry.response.len();
                     proxy_state.metrics.response_size_bytes.observe(response_size as f64);
@@ -495,14 +506,14 @@ where
         }
     }
 
-    let circuit_breaker_key = format!("{}:{}", target_url, "circuit_breaker");
+    let circuit_breaker_key = format!("{}:{}", target_urls[0], "circuit_breaker");
     let circuit_breaker_lock = proxy_state.circuit_breakers.entry(circuit_breaker_key.clone())
         .or_insert_with(|| Arc::new(RwLock::new(CircuitBreaker::new(target_circuit_breaker_config.as_ref().unwrap_or(&*default_circuit_breaker_config)))));
 
     {
         let mut circuit_breaker = circuit_breaker_lock.write().await;
         if !circuit_breaker.can_attempt() {
-            error!(request_id = %request_id, "Circuit breaker is open for: {}", target_url);
+            error!(request_id = %request_id, "Circuit breaker is open for: {}", target_urls[0]);
             return Ok(ProxyError::CircuitBreakerOpen.into());
         }
     }
@@ -522,13 +533,13 @@ where
 
         if let Some(header_key) = header_key {
             if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
-                let rate_limiter_key = format!("{}:{}", target_url, header_value);
+                let rate_limiter_key = format!("{}:{}", target_urls[0], header_value);
                 let rate_limiter_lock = proxy_state.rate_limiters.entry(rate_limiter_key.clone())
                     .or_insert_with(|| Arc::new(RwLock::new(RateLimiter::new(rate_limiter_config, Some(header_value)))));
 
                 let rate_limiter = rate_limiter_lock.read().await;
                 if !rate_limiter.acquire().await {
-                    error!(request_id = %request_id, "Rate limit exceeded for: {}", target_url);
+                    error!(request_id = %request_id, "Rate limit exceeded for: {}", target_urls[0]);
                     return Ok(ProxyError::RateLimitExceeded.into());
                 }
             }
@@ -560,6 +571,13 @@ where
     let mut retries = 0;
     let max_attempts = retry_strategy.max_attempts();
     while retries < max_attempts {
+        let target_url = if let Some(lb) = &proxy_state.load_balancer {
+            let mut lb = lb.write().await;
+            lb.get_target(&path).unwrap_or(target_urls[0].clone())
+        } else {
+            target_urls[0].clone()
+        };
+
         let mut req = rebuild_request(&mut original_req, &target_url, target_url_len, client_ip).await;
         if let Some(ref transforms) = request_transforms {
             apply_request_transforms(&mut req, transforms);
@@ -700,8 +718,6 @@ where
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
 
-
-
 fn find_target(
     proxy_state: &Arc<ProxyState>,
     path: &str,
@@ -709,7 +725,7 @@ fn find_target(
     default_retry_config: &Arc<RetryConfig>,
     default_timeout_seconds: u64,
 ) -> Option<(
-    String,
+    Vec<String>,
     usize,
     Option<AuthenticationConfig>,
     Box<dyn RetryStrategy>,
@@ -726,7 +742,7 @@ fn find_target(
     let mut target = None;
     for entry in target_map.iter() {
         let (p, (
-            url,
+            urls,
             auth_config,
             retries,
             req_transforms,
@@ -748,7 +764,7 @@ fn find_target(
                         values.get(header_value.to_str().unwrap_or_default())
                     }) {
                         target = Some((
-                            target_url.clone(),
+                            urls.clone(),
                             p.len(),
                             auth_config.clone(),
                             retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
@@ -766,7 +782,7 @@ fn find_target(
                 }
             } else {
                 target = Some((
-                    url.clone(),
+                    urls.clone(),
                     p.len(),
                     auth_config.clone(),
                     retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
@@ -844,7 +860,6 @@ async fn rebuild_request(
         .body(new_body)
         .expect("Failed to rebuild request")
 }
-
 
 fn apply_request_transforms(req: &mut Request<Body>, transforms: &[Transform]) {
     Transform::apply_request_transforms(req, transforms);
