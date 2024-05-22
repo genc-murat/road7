@@ -8,6 +8,7 @@ mod rate_limiter;
 mod transform;
 mod error;
 mod circuit_breaker;
+mod metrics;
 
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
@@ -426,9 +427,13 @@ struct ProxyState {
     caches: DashMap<String, Cache>,
     concurrency_limiter: Arc<Semaphore>,
     ongoing_requests: Arc<AtomicUsize>,
+    metrics: Arc<metrics::Metrics>, 
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // Metrics initialization
+    let metrics = Arc::new(metrics::Metrics::new());
+
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
 
@@ -474,6 +479,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         caches,
         concurrency_limiter: concurrency_limiter.clone(),
         ongoing_requests: ongoing_requests.clone(),
+        metrics: metrics.clone(), // Add metrics to ProxyState
     });
 
     let make_svc = {
@@ -483,6 +489,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
         let client = client.clone();
         let security_headers_config = Arc::clone(&security_headers_config);
+        let metrics = metrics.clone();
 
         make_service_fn(move |_| {
             let proxy_state = Arc::clone(&proxy_state);
@@ -491,6 +498,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
             let client = client.clone();
             let security_headers_config = Arc::clone(&security_headers_config);
+            let metrics = metrics.clone();
 
             async move {
                 Ok::<_, Infallible>(service_fn(move |req| {
@@ -500,9 +508,12 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                     let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
                     let client = client.clone();
                     let security_headers_config = Arc::clone(&security_headers_config);
+                    let metrics = metrics.clone();
 
                     async move {
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
+                        metrics.http_requests_total.inc(); // Increment the request count
+                        proxy_state.metrics.ongoing_requests.inc(); // Increment ongoing requests
                         let response = proxy_request(
                             req,
                             Arc::clone(&proxy_state),
@@ -514,6 +525,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             client,
                         ).await;
                         proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
+                        proxy_state.metrics.ongoing_requests.dec(); // Decrement ongoing requests
                         response
                     }
                 }))
@@ -537,7 +549,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
-
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
@@ -612,6 +623,16 @@ where
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("OK"))
+            .unwrap());
+    }
+
+    if path == "/metrics" {
+        info!(request_id = %request_id, "Metrics request received.");
+        let metrics_data = proxy_state.metrics.gather_metrics();
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body(Body::from(metrics_data))
             .unwrap());
     }
 
