@@ -20,6 +20,7 @@ pub enum LoadBalancingAlgorithm {
     WeightedRoundRobin,
     IPHash,
     ConsistentHashing,
+    WeightedLeastConnections, // Yeni algoritma
 }
 
 pub struct LoadBalancer {
@@ -37,7 +38,7 @@ impl LoadBalancer {
         algorithm: LoadBalancingAlgorithm,
         weights: Option<HashMap<String, Vec<usize>>>,
     ) -> Self {
-        let  weights = weights.unwrap_or_else(|| {
+        let weights = weights.unwrap_or_else(|| {
             let mut default_weights = HashMap::new();
             for (key, target_list) in &targets {
                 default_weights.insert(key.clone(), vec![1; target_list.len()]);
@@ -112,6 +113,14 @@ impl LoadBalancer {
                             let index = (u64::from_le_bytes(hash.as_ref()[..8].try_into().unwrap()) % target_list.len() as u64) as usize;
                             return Some(target_list[index].clone());
                         }
+                    },
+                    LoadBalancingAlgorithm::WeightedLeastConnections => {
+                        let weight_list = self.weights.get(key)?;
+                        let target = target_list.iter().enumerate()
+                            .map(|(i, t)| (t, self.connections.get(t).cloned().unwrap_or(0), weight_list[i]))
+                            .min_by_key(|(_, c, w)| (*c as f64 / *w as f64) as usize)?;
+                        *self.connections.entry(target.0.clone()).or_insert(0) += 1;
+                        return Some(target.0.clone());
                     },
                 }
             }
