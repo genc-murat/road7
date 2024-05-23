@@ -58,7 +58,7 @@ impl Default for RateLimiterConfig {
 
 #[derive(Debug)]
 pub enum RateLimiter {
-    TokenBucket(Arc<Semaphore>, u64, String),
+    TokenBucket(Arc<Semaphore>, Arc<SemaphoreRefill>),
     LeakyBucket(RwLock<LeakyBucketState>, String),
     FixedWindow(RwLock<FixedWindowState>, String),
     SlidingLog(RwLock<SlidingLogState>, String),
@@ -116,6 +116,27 @@ struct DynamicState {
     max_rate: u64,
 }
 
+#[derive(Debug, Clone)]
+struct SemaphoreRefill {
+    refill_rate: u64,
+    semaphore: Arc<Semaphore>,
+}
+
+impl SemaphoreRefill {
+    fn new(refill_rate: u64, semaphore: Arc<Semaphore>) -> Self {
+        let refill = Self { refill_rate, semaphore: semaphore.clone() };
+        let refill_clone = refill.clone();
+        tokio::spawn(async move {
+            let delay = Duration::from_secs_f64(1.0 / refill_rate as f64);
+            loop {
+                sleep(delay).await;
+                semaphore.add_permits(1);
+            }
+        });
+        refill
+    }
+}
+
 impl RateLimiter {
     pub fn new(config: &RateLimiterConfig, header_value: Option<&str>) -> Self {
         let key_suffix = header_value.unwrap_or_default();
@@ -125,12 +146,9 @@ impl RateLimiter {
                 burst_capacity,
                 header_key: _,
             } => {
-                let semaphore_key = format!("TokenBucket{}", key_suffix);
-                RateLimiter::TokenBucket(
-                    Arc::new(Semaphore::new(*burst_capacity as usize)),
-                    *refill_rate,
-                    semaphore_key,
-                )
+                let semaphore = Arc::new(Semaphore::new(*burst_capacity as usize));
+                let semaphore_refill = Arc::new(SemaphoreRefill::new(*refill_rate, semaphore.clone()));
+                RateLimiter::TokenBucket(semaphore, semaphore_refill)
             }
             RateLimiterConfig::LeakyBucket {
                 leak_rate,
@@ -237,215 +255,101 @@ impl RateLimiter {
 
     pub async fn acquire(&self) -> bool {
         match self {
-            RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
-                if semaphore.try_acquire().is_ok() {
-                    let semaphore = semaphore.clone();
-                    let refill_rate = *refill_rate as f64;
-            
-                    tokio::spawn(async move {
-                        let delay = Duration::from_secs_f64(1.0 / refill_rate);
-                        loop {
-                            sleep(delay).await;
-                            semaphore.add_permits(1);
-                        }
-                    });
-            
-                    true
-                } else {
-                    false
-                }
+            RateLimiter::TokenBucket(semaphore, _) => {
+                semaphore.try_acquire().is_ok()
             }
-            
-            
             RateLimiter::LeakyBucket(state, _) => {
                 let now = Instant::now();
-                let (tokens, bucket_size, leak_rate, last_refill) = {
-                    let state = state.read().await;
-                    (state.tokens, state.bucket_size, state.leak_rate, state.last_refill)
-                };
-                
-                let elapsed = now.duration_since(last_refill).as_secs();
-                let leaked_tokens = leak_rate.saturating_mul(elapsed);
-                let new_tokens = tokens.saturating_add(leaked_tokens).min(bucket_size);
-                
-                let should_allow = if new_tokens > 0 {
-                    new_tokens - 1
+                let mut state = state.write().await;
+                let elapsed = now.duration_since(state.last_refill).as_secs();
+                let leaked_tokens = state.leak_rate.saturating_mul(elapsed);
+                state.tokens = state.tokens.saturating_add(leaked_tokens).min(state.bucket_size);
+                state.last_refill = now;
+
+                if state.tokens > 0 {
+                    state.tokens -= 1;
+                    true
                 } else {
-                    0
-                };
-                
-                {
-                    let mut state = state.write().await;
-                    state.tokens = should_allow;
-                    state.last_refill = now;
+                    false
                 }
-            
-                should_allow > 0
             }
-            
             RateLimiter::FixedWindow(state, _) => {
                 let now = Instant::now();
-                let (mut current_requests, window_start, window_seconds, rate) = {
-                    let state = state.read().await;
-                    (state.current_requests, state.window_start, state.window_seconds, state.rate)
-                };
-            
-                let elapsed = now.duration_since(window_start).as_secs();
-                if elapsed >= window_seconds {
-                    current_requests = 0;
+                let mut state = state.write().await;
+                let elapsed = now.duration_since(state.window_start).as_secs();
+                if elapsed >= state.window_seconds {
+                    state.current_requests = 0;
+                    state.window_start = now;
                 }
-            
-                let should_allow = if current_requests < rate {
-                    current_requests + 1
+
+                if state.current_requests < state.rate {
+                    state.current_requests += 1;
+                    true
                 } else {
-                    current_requests
-                };
-            
-                {
-                    let mut state = state.write().await;
-                    if elapsed >= window_seconds {
-                        state.window_start = now;
-                    }
-                    state.current_requests = should_allow;
+                    false
                 }
-            
-                should_allow <= rate
             }
-            
             RateLimiter::SlidingLog(state, _) => {
                 let now = Instant::now();
-            
-                let (window_seconds, rate) = {
-                    let state = state.read().await;
-                    (state.window_seconds, state.rate)
-                };
-            
-                let window_start = now - Duration::from_secs(window_seconds);
-            
-                let mut requests_within_window = {
-                    let state = state.read().await;
-                    state.requests.iter().filter(|&&t| t >= window_start).cloned().collect::<Vec<_>>()
-                };
-            
-                let allow_request = if requests_within_window.len() < rate as usize {
-                    requests_within_window.push(now);
+                let mut state = state.write().await;
+                let window_start = now - Duration::from_secs(state.window_seconds);
+
+                state.requests.retain(|&t| t >= window_start);
+
+                if state.requests.len() < state.rate as usize {
+                    state.requests.push(now);
                     true
                 } else {
                     false
-                };
-            
-                if allow_request {
-                    let mut state = state.write().await;
-                    state.requests = requests_within_window;
                 }
-            
-                allow_request
             }
-            
             RateLimiter::SlidingWindow(state, _) => {
                 let now = Instant::now();
-            
-                let (mut current_requests, window_start, window_seconds, rate) = {
-                    let state = state.read().await;
-                    (state.current_requests, state.window_start, state.window_seconds, state.rate)
-                };
-            
-                let window_end = window_start + Duration::from_secs(window_seconds);
-            
-                let should_allow = if now >= window_end {
-                    current_requests = 1;
+                let mut state = state.write().await;
+                let window_end = state.window_start + Duration::from_secs(state.window_seconds);
+
+                if now >= window_end {
+                    state.current_requests = 1;
+                    state.window_start = now;
                     true
-                } else if current_requests < rate {
-                    current_requests += 1;
+                } else if state.current_requests < state.rate {
+                    state.current_requests += 1;
                     true
                 } else {
                     false
-                };
-            
-                if should_allow {
-                    let mut state = state.write().await;
-                    if now >= window_end {
-                        state.window_start = now;
-                    }
-                    state.current_requests = current_requests;
                 }
-            
-                should_allow
             }
-            
             RateLimiter::Quota(state, _) => {
                 let now = Instant::now();
-                let (mut remaining_quota, reset_time, period_seconds, quota) = {
-                    let state = state.read().await;
-                    (state.remaining_quota, state.reset_time, state.period_seconds, state.quota)
-                };
-            
-                let mut should_reset = false;
-            
-                if now >= reset_time {
-                    remaining_quota = quota;
-                    should_reset = true;
+                let mut state = state.write().await;
+                if now >= state.reset_time {
+                    state.remaining_quota = state.quota;
+                    state.reset_time = now + Duration::from_secs(state.period_seconds);
                 }
-            
-                let allow_request = if remaining_quota > 0 {
-                    remaining_quota -= 1;
+
+                if state.remaining_quota > 0 {
+                    state.remaining_quota -= 1;
                     true
                 } else {
                     false
-                };
-            
-                if allow_request || should_reset {
-                    let mut state = state.write().await;
-                    if should_reset {
-                        state.reset_time = now + Duration::from_secs(period_seconds);
-                    }
-                    state.remaining_quota = remaining_quota;
                 }
-            
-                allow_request
             }
-            
             RateLimiter::Dynamic(state, _) => {
                 let now = Instant::now();
-            
-                let (mut current_rate, last_adjusted, window_seconds, adjust_factor, min_rate, max_rate) = {
-                    let state = state.read().await;
-                    (
-                        state.current_rate,
-                        state.last_adjusted,
-                        state.window_seconds,
-                        state.adjust_factor,
-                        state.min_rate,
-                        state.max_rate,
-                    )
-                };
-            
-                let mut should_adjust = false;
-            
-                if now.duration_since(last_adjusted).as_secs() >= window_seconds {
-                    current_rate = (current_rate as f64 * adjust_factor)
-                        .clamp(min_rate as f64, max_rate as f64) as u64;
-                    should_adjust = true;
+                let mut state = state.write().await;
+                if now.duration_since(state.last_adjusted).as_secs() >= state.window_seconds {
+                    state.current_rate = (state.current_rate as f64 * state.adjust_factor)
+                        .clamp(state.min_rate as f64, state.max_rate as f64) as u64;
+                    state.last_adjusted = now;
                 }
-            
-                let allow_request = if current_rate > 0 {
-                    current_rate -= 1;
+
+                if state.current_rate > 0 {
+                    state.current_rate -= 1;
                     true
                 } else {
                     false
-                };
-            
-                if allow_request || should_adjust {
-                    let mut state = state.write().await;
-                    if should_adjust {
-                        state.last_adjusted = now;
-                    }
-                    state.current_rate = current_rate;
                 }
-            
-                allow_request
             }
-            
         }
     }
 }
