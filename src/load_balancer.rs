@@ -20,7 +20,7 @@ pub enum LoadBalancingAlgorithm {
     WeightedRoundRobin,
     IPHash,
     ConsistentHashing,
-    WeightedLeastConnections, // Yeni algoritma
+    WeightedLeastConnections,
 }
 
 pub struct LoadBalancer {

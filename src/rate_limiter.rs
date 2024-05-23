@@ -240,7 +240,7 @@ impl RateLimiter {
             RateLimiter::TokenBucket(semaphore, refill_rate, _) => {
                 if semaphore.try_acquire().is_ok() {
                     let semaphore = semaphore.clone();
-                    let refill_rate = *refill_rate as f64; // Convert refill_rate to f64
+                    let refill_rate = *refill_rate as f64;
             
                     tokio::spawn(async move {
                         let delay = Duration::from_secs_f64(1.0 / refill_rate);
@@ -315,7 +315,6 @@ impl RateLimiter {
             RateLimiter::SlidingLog(state, _) => {
                 let now = Instant::now();
             
-                // Acquire a read lock to access window_seconds and rate
                 let (window_seconds, rate) = {
                     let state = state.read().await;
                     (state.window_seconds, state.rate)
@@ -323,7 +322,6 @@ impl RateLimiter {
             
                 let window_start = now - Duration::from_secs(window_seconds);
             
-                // Retain only the timestamps within the window
                 let mut requests_within_window = {
                     let state = state.read().await;
                     state.requests.iter().filter(|&&t| t >= window_start).cloned().collect::<Vec<_>>()
@@ -336,7 +334,6 @@ impl RateLimiter {
                     false
                 };
             
-                // Update the state with the new requests log
                 if allow_request {
                     let mut state = state.write().await;
                     state.requests = requests_within_window;

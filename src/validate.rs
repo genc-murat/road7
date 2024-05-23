@@ -10,8 +10,7 @@ pub async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
         return Err("Invalid URI detected".to_string());
     }
 
-    // Limit the size of headers
-    let max_header_size = 8192; // 8 KB
+    let max_header_size = 8192;
     let total_header_size: usize = req.headers().iter().map(|(k, v)| k.as_str().len() + v.as_bytes().len()).sum();
     if total_header_size > max_header_size {
         return Err("Header size exceeds the limit".to_string());
@@ -23,12 +22,11 @@ pub async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
             return Err(format!("Invalid header name detected: {}", name));
         }
 
-        // Different regex for different headers
         let header_value = value.to_str().unwrap_or_default();
         let valid_value = match name.as_str() {
             "Content-Type" => Regex::new(r"^[a-zA-Z0-9\-._+\/;=\s]+$").unwrap().is_match(header_value),
             "User-Agent" => Regex::new(r"^[a-zA-Z0-9\-._~!$&'()*+,;=\/: ]+$").unwrap().is_match(header_value),
-            _ => Regex::new(r"^[\x20-\x7E]+$").unwrap().is_match(header_value), // Default to printable ASCII characters
+            _ => Regex::new(r"^[\x20-\x7E]+$").unwrap().is_match(header_value), 
         };
 
         if !valid_value {
@@ -40,8 +38,7 @@ pub async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
     let body_content = String::from_utf8_lossy(&body_bytes);
     let sanitized_body = clean(&body_content);
 
-    // Limit the size of the body
-    let max_body_size = 1048576; // 1 MB
+    let max_body_size = 1048576; 
     if body_bytes.len() > max_body_size {
         return Err("Body size exceeds the limit".to_string());
     }

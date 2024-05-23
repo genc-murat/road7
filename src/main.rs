@@ -71,7 +71,7 @@ struct ProxyConfig {
     security_headers_config: Option<SecurityHeadersConfig>,
     #[serde(default)]
     default_cors_config: Option<CorsConfig>, 
-    load_balancer: Option<LoadBalancerConfig>, // Load Balancer Konfigürasyonu
+    load_balancer: Option<LoadBalancerConfig>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -106,7 +106,7 @@ fn default_worker_threads() -> usize {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Target {
     path: String,
-    urls: Vec<String>, // Birden fazla URL
+    urls: Vec<String>, 
     authentication: Option<AuthenticationConfig>,
     retries: Option<RetryConfig>,
     request_transforms: Option<Vec<Transform>>,
@@ -145,7 +145,7 @@ struct ProxyState {
     target_map: DashMap<
         String,
         (
-            Vec<String>, // URL listesi
+            Vec<String>,
             Option<AuthenticationConfig>,
             Option<RetryConfig>,
             Option<Vec<Transform>>,
@@ -167,11 +167,10 @@ struct ProxyState {
     ongoing_requests: Arc<AtomicUsize>,
     metrics: Arc<metrics::Metrics>, 
     default_cors_config: Option<CorsConfig>,
-    load_balancer: Option<Arc<RwLock<LoadBalancer>>>, // Load Balancer durumu
+    load_balancer: Option<Arc<RwLock<LoadBalancer>>>, 
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // Metrics initialization
     let metrics = Arc::new(metrics::Metrics::new());
 
     let addr = format!("{}:{}", config.server.host, config.server.port)
@@ -217,7 +216,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             Arc::new(RwLock::new(LoadBalancer::new(
                 config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
                 lb_config.algorithm.clone(),
-                lb_config.weights.clone(), // Weights ekleniyor
+                lb_config.weights.clone(), 
             )))
         });
 
@@ -265,9 +264,9 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
                     async move {
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
-                        metrics.http_requests_total.inc(); // Increment the request count
-                        proxy_state.metrics.ongoing_requests.inc(); // Increment ongoing requests
-                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc(); // Increment HTTP method count
+                        metrics.http_requests_total.inc(); 
+                        proxy_state.metrics.ongoing_requests.inc(); 
+                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc(); 
                         let response = proxy_request(
                             req,
                             client_ip,
@@ -280,7 +279,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             client,
                         ).await;
                         proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
-                        proxy_state.metrics.ongoing_requests.dec(); // Decrement ongoing requests
+                        proxy_state.metrics.ongoing_requests.dec(); 
                         response
                     }
                 }))
@@ -310,7 +309,7 @@ fn build_target_map(
 ) -> DashMap<
     String,
     (
-        Vec<String>, // URL listesi
+        Vec<String>, 
         Option<AuthenticationConfig>,
         Option<RetryConfig>,
         Option<Vec<Transform>>,
@@ -428,7 +427,6 @@ where
         }
     };
 
-    // Kimlik doğrulama kontrolü
     if let Some(auth_config) = auth_config {
         match auth_config.auth_type {
             AuthenticationType::JWT => {
@@ -574,7 +572,7 @@ where
     while retries < max_attempts {
         let target_url = if let Some(lb) = &proxy_state.load_balancer {
             let mut lb = lb.write().await;
-            lb.get_target(&path, Some(&client_ip.to_string())).unwrap_or(target_urls[0].clone()) // Adjusted call to get_target
+            lb.get_target(&path, Some(&client_ip.to_string())).unwrap_or(target_urls[0].clone())
         } else {
             target_urls[0].clone()
         };
@@ -652,7 +650,6 @@ where
                             }
                         }
 
-                        // CORS yapılandırması
                         let cors_config = cors_config.or_else(|| proxy_state.default_cors_config.clone());
                         if let Some(cors_config) = cors_config {
                             if cors_config.enabled {
@@ -829,12 +826,10 @@ async fn rebuild_request(
         .version(original_req.version());
 
     if let Some(headers) = builder.headers_mut() {
-        // Forward all headers, including X-Forwarded-For
         for (key, value) in original_req.headers().iter() {
             headers.insert(key.clone(), value.clone());
         }
 
-        // Update or set X-Forwarded-For header
         let client_ip = client_ip.ip().to_string();
 
         let x_forwarded_for = original_req
@@ -850,11 +845,9 @@ async fn rebuild_request(
             headers.insert(HOST, HeaderValue::from_str(&auth).unwrap());
         }
 
-        // Add a custom header to indicate the request passed through the proxy
         headers.insert("X-Proxy", HeaderValue::from_static("road7"));
     }
 
-    // Rebuild the request body
     let body_bytes = hyper::body::to_bytes(original_req.body_mut()).await.unwrap_or_else(|_| hyper::body::Bytes::new());
     let new_body = Body::from(body_bytes);
 
