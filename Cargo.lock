@@ -1073,6 +1073,7 @@ dependencies = [
  "prometheus",
  "rand",
  "regex",
+ "ring 0.16.20",
  "rustls 0.20.9",
  "serde 1.0.201",
  "serde_derive",

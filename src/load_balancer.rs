@@ -1,9 +1,11 @@
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::error;
 use std::collections::HashMap;
-use tracing::error;
+use std::collections::hash_map::DefaultHasher;
+use ring::digest;
+use std::hash::{Hash, Hasher};
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoadBalancerConfig {
     pub algorithm: LoadBalancingAlgorithm,
@@ -16,6 +18,8 @@ pub enum LoadBalancingAlgorithm {
     Random,
     LeastConnections,
     WeightedRoundRobin,
+    IPHash,
+    ConsistentHashing,
 }
 
 pub struct LoadBalancer {
@@ -39,7 +43,7 @@ impl LoadBalancer {
             }
             default_weights
         });
-        
+
         LoadBalancer {
             targets,
             counters: HashMap::new(),
@@ -49,7 +53,7 @@ impl LoadBalancer {
         }
     }
 
-    pub fn get_target(&mut self, path: &str) -> Option<String> {
+    pub fn get_target(&mut self, path: &str, client_ip: Option<&str>) -> Option<String> {
         for (key, target_list) in &self.targets {
             if path.starts_with(key) {
                 match self.algorithm {
@@ -84,6 +88,24 @@ impl LoadBalancer {
                         }
                         *counter = (*counter + 1) % sum_of_weights;
                         return target;
+                    },
+                    LoadBalancingAlgorithm::IPHash => {
+                        if let Some(ip) = client_ip {
+                            let mut hasher = DefaultHasher::new();
+                            ip.hash(&mut hasher);
+                            let hash = hasher.finish();
+                            let index = (hash % target_list.len() as u64) as usize;
+                            return Some(target_list[index].clone());
+                        }
+                    },
+                    LoadBalancingAlgorithm::ConsistentHashing => {
+                        if let Some(ip) = client_ip {
+                            let mut context = digest::Context::new(&digest::SHA256);
+                            context.update(ip.as_bytes());
+                            let hash = context.finish();
+                            let index = (u64::from_le_bytes(hash.as_ref()[..8].try_into().unwrap()) % target_list.len() as u64) as usize;
+                            return Some(target_list[index].clone());
+                        }
                     },
                 }
             }

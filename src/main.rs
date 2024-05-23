@@ -574,7 +574,7 @@ where
     while retries < max_attempts {
         let target_url = if let Some(lb) = &proxy_state.load_balancer {
             let mut lb = lb.write().await;
-            lb.get_target(&path).unwrap_or(target_urls[0].clone())
+            lb.get_target(&path, Some(&client_ip.to_string())).unwrap_or(target_urls[0].clone()) // Adjusted call to get_target
         } else {
             target_urls[0].clone()
         };
@@ -718,6 +718,7 @@ where
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
+
 
 fn find_target(
     proxy_state: &Arc<ProxyState>,
