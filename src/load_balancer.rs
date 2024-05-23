@@ -1,10 +1,10 @@
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
-use ring::digest;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use ring::digest;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoadBalancerConfig {
@@ -27,6 +27,7 @@ pub struct LoadBalancer {
     counters: HashMap<String, usize>,
     connections: HashMap<String, usize>,
     weights: HashMap<String, Vec<usize>>,
+    weights_sum: HashMap<String, usize>,
     algorithm: LoadBalancingAlgorithm,
 }
 
@@ -36,7 +37,7 @@ impl LoadBalancer {
         algorithm: LoadBalancingAlgorithm,
         weights: Option<HashMap<String, Vec<usize>>>,
     ) -> Self {
-        let weights = weights.unwrap_or_else(|| {
+        let  weights = weights.unwrap_or_else(|| {
             let mut default_weights = HashMap::new();
             for (key, target_list) in &targets {
                 default_weights.insert(key.clone(), vec![1; target_list.len()]);
@@ -44,11 +45,17 @@ impl LoadBalancer {
             default_weights
         });
 
+        let mut weights_sum = HashMap::new();
+        for (key, weight_list) in &weights {
+            weights_sum.insert(key.clone(), weight_list.iter().sum());
+        }
+
         LoadBalancer {
             targets,
             counters: HashMap::new(),
             connections: HashMap::new(),
             weights,
+            weights_sum,
             algorithm,
         }
     }
@@ -77,11 +84,10 @@ impl LoadBalancer {
                     LoadBalancingAlgorithm::WeightedRoundRobin => {
                         let counter = self.counters.entry(key.to_string()).or_insert(0);
                         let weight_list = self.weights.get(key)?;
-                        let mut sum_of_weights: usize = 0;
+                        let sum_of_weights = *self.weights_sum.get(key)?;
                         let mut target = None;
                         for (i, weight) in weight_list.iter().enumerate() {
-                            sum_of_weights += weight;
-                            if *counter < sum_of_weights {
+                            if *counter < *weight {
                                 target = Some(target_list[i].clone());
                                 break;
                             }
