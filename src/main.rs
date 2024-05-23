@@ -213,12 +213,13 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         })
         .collect::<DashMap<_, _>>();
 
-    let load_balancer = config.load_balancer.as_ref().map(|lb_config| {
-        Arc::new(RwLock::new(LoadBalancer::new(
-            config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
-            lb_config.algorithm.clone()
-        )))
-    });
+        let load_balancer = config.load_balancer.as_ref().map(|lb_config| {
+            Arc::new(RwLock::new(LoadBalancer::new(
+                config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
+                lb_config.algorithm.clone(),
+                lb_config.weights.clone(), // Weights ekleniyor
+            )))
+        });
 
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
