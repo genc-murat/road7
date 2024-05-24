@@ -14,8 +14,10 @@ mod validate;
 mod security_headers;
 mod load_balancer;
 mod bot_detector;
+mod config;
 
 use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
+use crate::config::{read_config, AuthenticationType};
 use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
@@ -24,6 +26,7 @@ use crate::validate::validate_request;
 use crate::bot_detector::{is_bot_request, BotDetectorConfig};
 use cache::CorsConfig;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+use config::{AuthenticationConfig, LoggingConfig, ProxyConfig, Target};
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
 use retry::{RetryConfig, RetryStrategy};
@@ -59,97 +62,6 @@ use tokio::runtime::Builder;
 use tokio::task::spawn_blocking;
 use std::sync::Mutex;
 
-
-const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
-const DEFAULT_POOL_SIZE: usize = 10;
-const DEFAULT_WORKER_THREADS: usize = 1;
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ProxyConfig {
-    server: ServerConfig,
-    runtime: RuntimeConfig,
-    targets: Vec<Target>,
-    retries: RetryConfig,
-    #[serde(default)]
-    default_circuit_breaker_config: CircuitBreakerConfig,
-    #[serde(default = "default_timeout_seconds")]
-    default_timeout_seconds: u64,
-    #[serde(default)]
-    default_rate_limiter_config: Option<RateLimiterConfig>,
-    #[serde(default)]
-    security_headers_config: Option<SecurityHeadersConfig>,
-    #[serde(default)]
-    default_cors_config: Option<CorsConfig>,
-    load_balancer: Option<LoadBalancerConfig>,
-    bot_detector: Option<BotDetectorConfig>,
-}
-
-fn default_timeout_seconds() -> u64 {
-    DEFAULT_TIMEOUT_SECONDS
-}
-
-fn default_pool_size() -> usize {
-    DEFAULT_POOL_SIZE
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ServerConfig {
-    host: String,
-    port: u16,
-    max_logging_level: String,
-    #[serde(default = "default_pool_size")]
-    pool_size: usize,
-    recv_buffer_size: Option<usize>,
-    send_buffer_size: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RuntimeConfig {
-    #[serde(default = "default_worker_threads")]
-    worker_threads: usize,
-}
-
-fn default_worker_threads() -> usize {
-    DEFAULT_WORKER_THREADS
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct Target {
-    path: String,
-    urls: Vec<String>,
-    authentication: Option<AuthenticationConfig>,
-    retries: Option<RetryConfig>,
-    request_transforms: Option<Vec<Transform>>,
-    response_transforms: Option<Vec<Transform>>,
-    circuit_breaker_config: Option<CircuitBreakerConfig>,
-    rate_limiter_config: Option<RateLimiterConfig>,
-    routing_header: Option<String>,
-    routing_values: Option<HashMap<String, String>>,
-    timeout_seconds: Option<u64>,
-    cache_config: Option<CacheConfig>,
-    logging_config: Option<LoggingConfig>,
-    cors_config: Option<CorsConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct AuthenticationConfig {
-    #[serde(rename = "type")]
-    auth_type: AuthenticationType,
-    jwt_secret: Option<String>,
-    basic_users: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-enum AuthenticationType {
-    JWT,
-    Basic,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct LoggingConfig {
-    log_requests: bool,
-    log_responses: bool,
-}
 
 struct ProxyState {
     target_map: DashMap<
@@ -933,12 +845,6 @@ fn main() {
             error!("Error running proxy: {}", e);
         }
     });
-}
-
-fn read_config() -> Result<ProxyConfig, config::ConfigError> {
-    let mut settings = config::Config::default();
-    settings.merge(config::File::with_name("config")).unwrap();
-    settings.try_into()
 }
 
 async fn serve_static_file(path: &str) -> Result<Response<Body>, hyper::Error> {
