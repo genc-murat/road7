@@ -5,6 +5,10 @@ use tracing::info;
 pub const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
 pub const FEATURE_POLICY: HeaderName = HeaderName::from_static("feature-policy");
 
+pub const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+pub const DEFAULT_X_XSS_PROTECTION: &str = "1; mode=block";
+pub const DEFAULT_REFERRER_POLICY: &str = "no-referrer";
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SecurityHeadersConfig {
     pub strict_transport_security: Option<String>,
@@ -26,20 +30,19 @@ pub async fn apply_security_headers(headers: &mut HeaderMap, security_headers_co
         if let Some(csp) = &config.content_security_policy {
             headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(csp).unwrap());
         } else {
-            let default_csp = "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
-            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(default_csp).unwrap());
+            headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_str(DEFAULT_CSP).unwrap());
         }
         
         if let Some(xss_protection) = &config.x_xss_protection {
             headers.insert(X_XSS_PROTECTION, HeaderValue::from_str(xss_protection).unwrap());
         } else {
-            headers.insert(X_XSS_PROTECTION, HeaderValue::from_static("1; mode=block"));
+            headers.insert(X_XSS_PROTECTION, HeaderValue::from_static(DEFAULT_X_XSS_PROTECTION));
         }
         
         if let Some(referrer_policy) = &config.referrer_policy {
             headers.insert(REFERRER_POLICY, HeaderValue::from_str(referrer_policy).unwrap());
         } else {
-            headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+            headers.insert(REFERRER_POLICY, HeaderValue::from_static(DEFAULT_REFERRER_POLICY));
         }
         
         insert_header(headers, PERMISSIONS_POLICY, &config.permissions_policy);
@@ -106,9 +109,9 @@ mod tests {
         assert_eq!(headers.get(STRICT_TRANSPORT_SECURITY).unwrap(), "max-age=31536000");
         assert!(headers.get(X_CONTENT_TYPE_OPTIONS).is_none());
         assert!(headers.get(X_FRAME_OPTIONS).is_none());
-        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
-        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), "1; mode=block");
-        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), DEFAULT_CSP);
+        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), DEFAULT_X_XSS_PROTECTION);
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), DEFAULT_REFERRER_POLICY);
         assert!(headers.get(PERMISSIONS_POLICY).is_none());
         assert!(headers.get(FEATURE_POLICY).is_none());
     }
@@ -132,9 +135,9 @@ mod tests {
         assert!(headers.get(STRICT_TRANSPORT_SECURITY).is_none());
         assert!(headers.get(X_CONTENT_TYPE_OPTIONS).is_none());
         assert!(headers.get(X_FRAME_OPTIONS).is_none());
-        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
-        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), "1; mode=block");
-        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), DEFAULT_CSP);
+        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), DEFAULT_X_XSS_PROTECTION);
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), DEFAULT_REFERRER_POLICY);
         assert!(headers.get(PERMISSIONS_POLICY).is_none());
         assert!(headers.get(FEATURE_POLICY).is_none());
     }
