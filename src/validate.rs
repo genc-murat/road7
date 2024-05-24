@@ -31,7 +31,7 @@ pub async fn validate_request(req: &mut Request<Body>) -> Result<(), String> {
             return Err(format!("Invalid header name detected: {}", name));
         }
 
-        let header_value = value.to_str().unwrap_or_default();
+        let header_value = value.to_str().map_err(|_| format!("Non-ASCII header value detected for {}", name))?;
         let valid_value = match name.as_str() {
             "Content-Type" => CONTENT_TYPE_REGEX.is_match(header_value),
             "User-Agent" => USER_AGENT_REGEX.is_match(header_value),
