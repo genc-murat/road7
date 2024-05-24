@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use hyper::Request;
 use regex::Regex;
+use tracing::info;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BotDetectorConfig {
@@ -13,32 +14,32 @@ pub struct BotDetectorConfig {
 pub fn is_bot_request(req: &Request<hyper::Body>, config: &BotDetectorConfig) -> bool {
     if let Some(user_agent) = req.headers().get(hyper::header::USER_AGENT) {
         let user_agent = user_agent.to_str().unwrap_or_default();
-        println!("User-Agent: {}", user_agent);
+        info!("User-Agent: {}", user_agent);
 
         if config.allow.iter().any(|s| user_agent.contains(s)) {
-            println!("Allowed User-Agent: {}", user_agent);
+            info!("Allowed User-Agent: {}", user_agent);
             return false;
         }
 
         if config.deny.iter().any(|s| user_agent.contains(s)) {
-            println!("Denied User-Agent: {}", user_agent);
+            info!("Denied User-Agent: {}", user_agent);
             return true;
         }
 
         for pattern in &config.patterns {
             if let Ok(regex) = Regex::new(pattern) {
                 if regex.is_match(user_agent) {
-                    println!("Pattern Matched User-Agent: {}", user_agent);
+                    info!("Pattern Matched User-Agent: {}", user_agent);
                     return true;
                 }
             }
         }
     } else {
-        println!("No User-Agent header present");
+        info!("No User-Agent header present");
     }
 
     if config.empty_user_agent_is_bot && req.headers().get(hyper::header::USER_AGENT).is_none() {
-        println!("Empty User-Agent detected");
+        info!("Empty User-Agent detected");
         return true;
     }
 
