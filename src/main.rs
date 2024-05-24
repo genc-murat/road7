@@ -27,6 +27,8 @@ use hyper::server::conn::AddrStream;
 use retry::{RetryConfig, RetryStrategy};
 use rate_limiter::{RateLimiter, RateLimiterConfig};
 use security_headers::SecurityHeadersConfig;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
@@ -34,6 +36,7 @@ use hyper::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALL
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
 use serde::{Deserialize, Serialize};
@@ -403,6 +406,11 @@ where
     proxy_state.metrics.ongoing_requests.inc();
 
     let start_time = Instant::now();
+
+    let static_file_path = format!("./static{}", path);
+    if Path::new(&static_file_path).exists() {
+        return serve_static_file(&static_file_path).await;
+    }
 
     let (
         target_urls,
@@ -910,4 +918,21 @@ fn read_config() -> Result<ProxyConfig, config::ConfigError> {
     let mut settings = config::Config::default();
     settings.merge(config::File::with_name("config")).unwrap();
     settings.try_into()
+}
+
+async fn serve_static_file(path: &str) -> Result<Response<Body>, hyper::Error> {
+    match File::open(path).await {
+        Ok(mut file) => {
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).await.unwrap();
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(contents))
+                .unwrap())
+        }
+        Err(_) => Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("File not found"))
+            .unwrap()),
+    }
 }
