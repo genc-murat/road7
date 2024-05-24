@@ -59,7 +59,7 @@ fn insert_header(headers: &mut HeaderMap, header_name: HeaderName, header_value:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{HeaderMap, HeaderName, HeaderValue};
+    use hyper::header::HeaderMap;
 
     #[tokio::test]
     async fn test_apply_security_headers_with_full_config() {

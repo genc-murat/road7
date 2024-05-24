@@ -167,7 +167,6 @@ mod tests {
         let target1 = lb.get_target("/service1", None);
         let target2 = lb.get_target("/service1", None);
 
-        // Simulate some connections
         lb.connections.insert(target1.clone().unwrap(), 1);
         lb.connections.insert(target2.clone().unwrap(), 2);
 
@@ -177,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_weighted_round_robin() {
-        let mut targets = setup_targets();
+        let targets = setup_targets();
         let mut weights = HashMap::new();
         weights.insert("/service1".to_string(), vec![2, 1]);
 
@@ -213,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_weighted_least_connections() {
-        let mut targets = setup_targets();
+        let targets = setup_targets();
         let mut weights = HashMap::new();
         weights.insert("/service1".to_string(), vec![3, 1]);
 
@@ -222,7 +221,6 @@ mod tests {
         let target1 = lb.get_target("/service1", None);
         let target2 = lb.get_target("/service1", None);
 
-        // Simulate some connections
         lb.connections.insert(target1.clone().unwrap(), 1);
         lb.connections.insert(target2.clone().unwrap(), 2);
 

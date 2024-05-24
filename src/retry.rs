@@ -409,7 +409,7 @@ mod tests {
     fn test_harmonic_backoff() {
         let mut strategy = HarmonicBackoffStrategy::new(Duration::from_secs(10), 3);
         assert_eq!(strategy.delay(), Duration::from_secs(10));
-        assert_eq!(strategy.delay(), Duration::from_secs(5));  // 10/2
+        assert_eq!(strategy.delay(), Duration::from_secs(5)); 
 
         let expected_delay = Duration::from_secs_f64(10.0 / 3.0);
         let actual_delay = strategy.delay();

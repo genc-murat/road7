@@ -15,19 +15,16 @@ pub fn is_bot_request(req: &Request<hyper::Body>, config: &BotDetectorConfig) ->
         let user_agent = user_agent.to_str().unwrap_or_default();
         println!("User-Agent: {}", user_agent);
 
-        // Check if user agent is in the allow list
         if config.allow.iter().any(|s| user_agent.contains(s)) {
             println!("Allowed User-Agent: {}", user_agent);
             return false;
         }
 
-        // Check if user agent is in the deny list
         if config.deny.iter().any(|s| user_agent.contains(s)) {
             println!("Denied User-Agent: {}", user_agent);
             return true;
         }
 
-        // Check if user agent matches any pattern
         for pattern in &config.patterns {
             if let Ok(regex) = Regex::new(pattern) {
                 if regex.is_match(user_agent) {
@@ -40,7 +37,6 @@ pub fn is_bot_request(req: &Request<hyper::Body>, config: &BotDetectorConfig) ->
         println!("No User-Agent header present");
     }
 
-    // Check if user agent is empty and empty_user_agent_is_bot is true
     if config.empty_user_agent_is_bot && req.headers().get(hyper::header::USER_AGENT).is_none() {
         println!("Empty User-Agent detected");
         return true;

@@ -159,7 +159,6 @@ mod tests {
         let transforms = vec![create_transform("X-Custom-Header", "UnknownOp", Some("Value"))];
         Transform::apply_header_transforms(&mut headers, &transforms);
 
-        // Header should remain unchanged
         assert_eq!(headers.get("X-Custom-Header").unwrap(), "Value");
     }
 }
