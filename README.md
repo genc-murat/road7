@@ -110,21 +110,6 @@ Static file serving offloads the delivery of static content from your backend se
 - **Static File Support**: Serves static files directly from a specified directory, reducing load on backend servers. Ideal for serving images, CSS, JavaScript, and other static assets.
 - **Efficient Handling**: Optimized for serving static content with minimal overhead. Ensures fast and efficient delivery of static resources.
 
-## Why Choose Road7?
-
-Road7 is designed to provide a comprehensive solution for modern web applications, offering advanced features and robust performance. Here’s why you should consider using Road7:
-
-- **Flexibility**: Road7’s modular architecture allows you to customize and extend its functionality to meet your specific needs.
-- **Performance**: Built with Rust, Road7 is optimized for high performance, ensuring low latency and efficient resource usage.
-- **Scal
-
-ability**: Road7 handles high traffic loads with ease, making it suitable for both small applications and large-scale enterprise deployments.
-- **Security**: Advanced security features, including authentication, rate limiting, circuit breaking, and security headers, ensure your applications are protected.
-- **Ease of Use**: Road7 is easy to configure and deploy, with clear documentation and comprehensive configuration options.
-- **Community and Support**: Road7 is an open-source project with an active community. Contributions are welcome, and support is readily available.
-
-With its rich feature set and robust architecture, Road7 is the ideal choice for developers and enterprises looking to implement a scalable, secure, and high-performance proxy solution.
-
 ## Installation
 
 To install Road7, you need to have Rust and Cargo installed. Then, clone the repository and build the project.
