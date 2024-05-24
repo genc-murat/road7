@@ -76,3 +76,12 @@ content_security_policy = "default-src 'self'; script-src 'self' 'unsafe-inline'
 x_xss_protection = "1; mode=block"
 referrer_policy = "no-referrer"
 permissions_policy = "geolocation=(), microphone=(), camera=()"
+
+[bot_detector]
+allow = ["MyAndroidClient/1.0", "Pingdom.com_bot_version_1.1"]
+deny = ["a", "b"]
+patterns = [
+    "(Pingdom.com_bot_version_).*",
+    "(facebookexternalhit)/.*"
+]
+empty_user_agent_is_bot = true

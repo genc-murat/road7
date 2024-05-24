@@ -13,6 +13,7 @@ mod cache;
 mod validate;
 mod security_headers;
 mod load_balancer;
+mod bot_detector;
 
 use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
 use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
@@ -20,6 +21,7 @@ use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
 use crate::security_headers::apply_security_headers;
 use crate::validate::validate_request;
+use crate::bot_detector::{is_bot_request, BotDetectorConfig};
 use cache::CorsConfig;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use error::ProxyError;
@@ -57,7 +59,6 @@ use tokio::runtime::Builder;
 use tokio::task::spawn_blocking;
 use std::sync::Mutex;
 
-
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
     server: ServerConfig,
@@ -73,8 +74,9 @@ struct ProxyConfig {
     #[serde(default)]
     security_headers_config: Option<SecurityHeadersConfig>,
     #[serde(default)]
-    default_cors_config: Option<CorsConfig>, 
+    default_cors_config: Option<CorsConfig>,
     load_balancer: Option<LoadBalancerConfig>,
+    bot_detector: Option<BotDetectorConfig>, // Add bot detector config
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -109,7 +111,7 @@ fn default_worker_threads() -> usize {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Target {
     path: String,
-    urls: Vec<String>, 
+    urls: Vec<String>,
     authentication: Option<AuthenticationConfig>,
     retries: Option<RetryConfig>,
     request_transforms: Option<Vec<Transform>>,
@@ -168,9 +170,10 @@ struct ProxyState {
     caches: DashMap<String, Cache>,
     concurrency_limiter: Arc<Semaphore>,
     ongoing_requests: Arc<AtomicUsize>,
-    metrics: Arc<metrics::Metrics>, 
+    metrics: Arc<metrics::Metrics>,
     default_cors_config: Option<CorsConfig>,
-    load_balancer: Option<Arc<RwLock<LoadBalancer>>>, 
+    load_balancer: Option<Arc<RwLock<LoadBalancer>>>,
+    bot_detector: Option<Arc<BotDetectorConfig>>, // Add bot detector
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -215,13 +218,15 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         })
         .collect::<DashMap<_, _>>();
 
-        let load_balancer = config.load_balancer.as_ref().map(|lb_config| {
-            Arc::new(RwLock::new(LoadBalancer::new(
-                config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
-                lb_config.algorithm.clone(),
-                lb_config.weights.clone(), 
-            )))
-        });
+    let load_balancer = config.load_balancer.as_ref().map(|lb_config| {
+        Arc::new(RwLock::new(LoadBalancer::new(
+            config.targets.iter().map(|t| (t.path.clone(), t.urls.clone())).collect(),
+            lb_config.algorithm.clone(),
+            lb_config.weights.clone(),
+        )))
+    });
+
+    let bot_detector = config.bot_detector.as_ref().map(|bot_config| Arc::new(bot_config.clone())); // Initialize bot detector
 
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
@@ -233,6 +238,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         metrics: metrics.clone(),
         default_cors_config,
         load_balancer,
+        bot_detector, // Add bot detector to proxy state
     });
 
     let make_svc = {
@@ -267,9 +273,20 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
                     async move {
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
-                        metrics.http_requests_total.inc(); 
-                        proxy_state.metrics.ongoing_requests.inc(); 
-                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc(); 
+                        metrics.http_requests_total.inc();
+                        proxy_state.metrics.ongoing_requests.inc();
+                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
+
+                        // Bot detection logic
+                        if let Some(bot_detector) = &proxy_state.bot_detector {
+                            if is_bot_request(&req, bot_detector) {
+                                warn!("Bot detected and request rejected: {:?}", req);
+                                proxy_state.metrics.failed_requests.inc();
+                                proxy_state.metrics.error_counts.with_label_values(&["bot_detected"]).inc();
+                                return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
+                            }
+                        }
+
                         let response = proxy_request(
                             req,
                             client_ip,
@@ -282,7 +299,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             client,
                         ).await;
                         proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
-                        proxy_state.metrics.ongoing_requests.dec(); 
+                        proxy_state.metrics.ongoing_requests.dec();
                         response
                     }
                 }))
@@ -312,7 +329,7 @@ fn build_target_map(
 ) -> DashMap<
     String,
     (
-        Vec<String>, 
+        Vec<String>,
         Option<AuthenticationConfig>,
         Option<RetryConfig>,
         Option<Vec<Transform>>,
