@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use config::{Config, ConfigError};
 use std::collections::HashMap;
 
-use crate::{bot_detector::BotDetectorConfig, cache::{CacheConfig, CorsConfig}, circuit_breaker::CircuitBreakerConfig, load_balancer::LoadBalancerConfig, rate_limiter::RateLimiterConfig, retry::RetryConfig, security_headers::SecurityHeadersConfig, transform::Transform};
+use crate::{bot_detector::BotDetectorConfig, cache::{CacheConfig, CorsConfig}, circuit_breaker::CircuitBreakerConfig, load_balancer::LoadBalancerConfig,  retry::RetryConfig, security_headers::SecurityHeadersConfig, transform::Transform};
 
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_POOL_SIZE: usize = 10;
@@ -18,8 +18,6 @@ pub struct ProxyConfig {
     pub default_circuit_breaker_config: CircuitBreakerConfig,
     #[serde(default = "default_timeout_seconds")]
     pub default_timeout_seconds: u64,
-    #[serde(default)]
-    pub default_rate_limiter_config: Option<RateLimiterConfig>,
     #[serde(default)]
     pub security_headers_config: Option<SecurityHeadersConfig>,
     #[serde(default)]
@@ -66,7 +64,6 @@ pub struct Target {
     pub request_transforms: Option<Vec<Transform>>,
     pub response_transforms: Option<Vec<Transform>>,
     pub circuit_breaker_config: Option<CircuitBreakerConfig>,
-    pub rate_limiter_config: Option<RateLimiterConfig>,
     pub routing_header: Option<String>,
     pub routing_values: Option<HashMap<String, String>>,
     pub timeout_seconds: Option<u64>,

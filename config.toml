@@ -50,8 +50,6 @@ response_transforms = [
 path = "/api/service2"
 url = "https://localhost:7277"
 timeout_seconds = 3
-# This target uses the default retry and circuit breaker configuration
-rate_limiter_config = { TokenBucket = { refill_rate = 2, burst_capacity = 5, header_key = "Client-ID" } }
 cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
 logging_config = { log_requests = true, log_responses = true }
 authentication = {jwt_secret = "your_secret_key",type = "JWT" }
@@ -65,8 +63,6 @@ retries = { strategy = "FixedInterval", max_attempts = 4, base_delay_seconds = 1
 # Specific circuit breaker configuration for this target
 circuit_breaker_config = { max_failures = 1, reset_timeout_seconds = 10, half_open_attempts = 1 }
 
-[default_rate_limiter_config]
-TokenBucket = { refill_rate = 10, burst_capacity = 20 } # Default is a Token Bucket
 
 [security_headers_config]
 strict_transport_security = "max-age=31536000; includeSubDomains"

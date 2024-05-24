@@ -4,7 +4,6 @@ mod auth {
 }
 
 mod retry;
-mod rate_limiter;
 mod transform;
 mod error;
 mod circuit_breaker;
@@ -30,7 +29,6 @@ use config::{AuthenticationConfig, LoggingConfig, ProxyConfig, Target};
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
 use retry::{RetryConfig, RetryStrategy};
-use rate_limiter::{RateLimiter, RateLimiterConfig};
 use security_headers::SecurityHeadersConfig;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -74,7 +72,6 @@ struct ProxyState {
             Option<Vec<Transform>>,
             Option<Vec<Transform>>,
             Option<CircuitBreakerConfig>,
-            Option<RateLimiterConfig>,
             Option<String>,
             Option<HashMap<String, String>>,
             Option<CacheConfig>,
@@ -84,7 +81,6 @@ struct ProxyState {
         ),
     >,
     circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
-    rate_limiters: DashMap<String, Arc<RwLock<RateLimiter>>>,
     caches: DashMap<String, Cache>,
     concurrency_limiter: Arc<Semaphore>,
     ongoing_requests: Arc<AtomicUsize>,
@@ -106,7 +102,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let retry_config = Arc::new(config.retries);
     let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
     let default_timeout_seconds = config.default_timeout_seconds;
-    let default_rate_limiter_config = Arc::new(config.default_rate_limiter_config);
     let security_headers_config = Arc::new(config.security_headers_config.clone());
     let default_cors_config = config.default_cors_config.clone();
 
@@ -129,7 +124,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let caches = initial_target_map.iter()
         .filter_map(|entry| {
-            let (path, (_, _, _, _, _, _, _, _, _, cache_config, _, _, _)) = entry.pair();
+            let (path, (_, _, _, _, _, _, _, _, cache_config, _, _, _)) = entry.pair();
             cache_config.as_ref().map(|config| {
                 (path.clone(), Cache::new(config))
             })
@@ -149,7 +144,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
         circuit_breakers: DashMap::new(),
-        rate_limiters: DashMap::new(),
         caches,
         concurrency_limiter: concurrency_limiter.clone(),
         ongoing_requests: ongoing_requests.clone(),
@@ -163,7 +157,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         let proxy_state = Arc::clone(&proxy_state);
         let retry_config = Arc::clone(&retry_config);
         let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-        let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
         let client = client.clone();
         let security_headers_config = Arc::clone(&security_headers_config);
         let metrics = metrics.clone();
@@ -172,7 +165,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             let proxy_state = Arc::clone(&proxy_state);
             let retry_config = Arc::clone(&retry_config);
             let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-            let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
             let client = client.clone();
             let security_headers_config = Arc::clone(&security_headers_config);
             let metrics = metrics.clone();
@@ -184,7 +176,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                     let proxy_state = Arc::clone(&proxy_state);
                     let retry_config = Arc::clone(&retry_config);
                     let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-                    let default_rate_limiter_config = Arc::clone(&default_rate_limiter_config);
                     let client = client.clone();
                     let security_headers_config = Arc::clone(&security_headers_config);
                     let metrics = metrics.clone();
@@ -210,7 +201,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             Arc::clone(&proxy_state),
                             retry_config,
                             default_circuit_breaker_config,
-                            default_rate_limiter_config,
                             default_timeout_seconds,
                             security_headers_config,
                             client,
@@ -252,7 +242,6 @@ fn build_target_map(
         Option<Vec<Transform>>,
         Option<Vec<Transform>>,
         Option<CircuitBreakerConfig>,
-        Option<RateLimiterConfig>,
         Option<String>,
         Option<HashMap<String, String>>,
         Option<CacheConfig>,
@@ -272,7 +261,6 @@ fn build_target_map(
                 target.request_transforms.clone(),
                 target.response_transforms.clone(),
                 target.circuit_breaker_config.clone(),
-                target.rate_limiter_config.clone(),
                 target.routing_header.clone(),
                 target.routing_values.clone(),
                 target.cache_config.clone(),
@@ -291,7 +279,6 @@ async fn proxy_request<C>(
     proxy_state: Arc<ProxyState>,
     default_retry_config: Arc<RetryConfig>,
     default_circuit_breaker_config: Arc<CircuitBreakerConfig>,
-    default_rate_limiter_config: Arc<Option<RateLimiterConfig>>,
     default_timeout_seconds: u64,
     security_headers_config: Arc<Option<SecurityHeadersConfig>>,
     client: Client<C>,
@@ -354,7 +341,6 @@ where
         request_transforms,
         response_transforms,
         target_circuit_breaker_config,
-        target_rate_limiter_config,
         target_timeout,
         target_cache_config,
         logging_config,
@@ -456,34 +442,6 @@ where
         if !circuit_breaker.can_attempt() {
             error!(request_id = %request_id, "Circuit breaker is open for: {}", target_urls[0]);
             return Ok(ProxyError::CircuitBreakerOpen.into());
-        }
-    }
-
-    if let Some(rate_limiter_config) = target_rate_limiter_config.as_ref().or_else(|| default_rate_limiter_config.as_ref().as_ref()) {
-        let header_key = match rate_limiter_config {
-            RateLimiterConfig::TokenBucket { header_key, .. } |
-            RateLimiterConfig::LeakyBucket { header_key, .. } |
-            RateLimiterConfig::FixedWindow { header_key, .. } |
-            RateLimiterConfig::SlidingLog { header_key, .. } |
-            RateLimiterConfig::SlidingWindow { header_key, .. } |
-            RateLimiterConfig::Quota { header_key, .. } |
-            RateLimiterConfig::Dynamic { header_key, .. } => {
-                header_key.as_deref()
-            }
-        };
-
-        if let Some(header_key) = header_key {
-            if let Some(header_value) = original_req.headers().get(header_key).and_then(|v| v.to_str().ok()) {
-                let rate_limiter_key = format!("{}:{}", target_urls[0], header_value);
-                let rate_limiter_lock = proxy_state.rate_limiters.entry(rate_limiter_key.clone())
-                    .or_insert_with(|| Arc::new(RwLock::new(RateLimiter::new(rate_limiter_config, Some(header_value)))));
-
-                let rate_limiter = rate_limiter_lock.read().await;
-                if !rate_limiter.acquire().await {
-                    error!(request_id = %request_id, "Rate limit exceeded for: {}", target_urls[0]);
-                    return Ok(ProxyError::RateLimitExceeded.into());
-                }
-            }
         }
     }
 
@@ -673,7 +631,6 @@ fn find_target(
     Option<Vec<Transform>>,
     Option<Vec<Transform>>,
     Option<CircuitBreakerConfig>,
-    Option<RateLimiterConfig>,
     u64,
     Option<CacheConfig>,
     Option<LoggingConfig>,
@@ -689,7 +646,6 @@ fn find_target(
             req_transforms,
             resp_transforms,
             cb_config,
-            rate_limiter_config,
             routing_header,
             routing_values,
             cache_config,
@@ -712,7 +668,6 @@ fn find_target(
                             req_transforms.clone(),
                             resp_transforms.clone(),
                             cb_config.clone(),
-                            rate_limiter_config.clone(),
                             t_timeout.unwrap_or(default_timeout_seconds),
                             cache_config.clone(),
                             log_config.clone(),
@@ -730,7 +685,6 @@ fn find_target(
                     req_transforms.clone(),
                     resp_transforms.clone(),
                     cb_config.clone(),
-                    rate_limiter_config.clone(),
                     t_timeout.unwrap_or(default_timeout_seconds),
                     cache_config.clone(),
                     log_config.clone(),
