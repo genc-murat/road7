@@ -76,7 +76,7 @@ struct ProxyConfig {
     #[serde(default)]
     default_cors_config: Option<CorsConfig>,
     load_balancer: Option<LoadBalancerConfig>,
-    bot_detector: Option<BotDetectorConfig>, // Add bot detector config
+    bot_detector: Option<BotDetectorConfig>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -173,7 +173,7 @@ struct ProxyState {
     metrics: Arc<metrics::Metrics>,
     default_cors_config: Option<CorsConfig>,
     load_balancer: Option<Arc<RwLock<LoadBalancer>>>,
-    bot_detector: Option<Arc<BotDetectorConfig>>, // Add bot detector
+    bot_detector: Option<Arc<BotDetectorConfig>>, 
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -226,7 +226,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         )))
     });
 
-    let bot_detector = config.bot_detector.as_ref().map(|bot_config| Arc::new(bot_config.clone())); // Initialize bot detector
+    let bot_detector = config.bot_detector.as_ref().map(|bot_config| Arc::new(bot_config.clone()));
 
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
@@ -238,7 +238,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         metrics: metrics.clone(),
         default_cors_config,
         load_balancer,
-        bot_detector, // Add bot detector to proxy state
+        bot_detector, 
     });
 
     let make_svc = {
@@ -277,7 +277,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                         proxy_state.metrics.ongoing_requests.inc();
                         metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
 
-                        // Bot detection logic
                         if let Some(bot_detector) = &proxy_state.bot_detector {
                             if is_bot_request(&req, bot_detector) {
                                 warn!("Bot detected and request rejected: {:?}", req);

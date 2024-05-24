@@ -20,7 +20,7 @@ pub enum ProxyError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
     #[error("Forbidden: {0}")]
-    Forbidden(String),  // Add Forbidden variant
+    Forbidden(String),
 }
 
 impl From<ProxyError> for Response<Body> {
@@ -58,7 +58,7 @@ impl From<ProxyError> for Response<Body> {
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::from(error.to_string()))
                 .unwrap(),
-            ProxyError::Forbidden(_) => Response::builder()  // Add case for Forbidden variant
+            ProxyError::Forbidden(_) => Response::builder()
                 .status(StatusCode::FORBIDDEN)
                 .body(Body::from(error.to_string()))
                 .unwrap(),
