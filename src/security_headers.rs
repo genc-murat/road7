@@ -54,3 +54,103 @@ fn insert_header(headers: &mut HeaderMap, header_name: HeaderName, header_value:
         headers.insert(header_name, HeaderValue::from_str(value).unwrap());
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::header::{HeaderMap, HeaderName, HeaderValue};
+
+    #[tokio::test]
+    async fn test_apply_security_headers_with_full_config() {
+        let config = SecurityHeadersConfig {
+            strict_transport_security: Some("max-age=31536000; includeSubDomains".to_string()),
+            x_content_type_options: Some("nosniff".to_string()),
+            x_frame_options: Some("DENY".to_string()),
+            content_security_policy: Some("default-src 'self'".to_string()),
+            x_xss_protection: Some("1; mode=block".to_string()),
+            referrer_policy: Some("no-referrer".to_string()),
+            permissions_policy: Some("geolocation=()".to_string()),
+            feature_policy: Some("vibrate 'none'".to_string()),
+        };
+
+        let mut headers = HeaderMap::new();
+        apply_security_headers(&mut headers, &Some(config)).await;
+
+        assert_eq!(headers.get(STRICT_TRANSPORT_SECURITY).unwrap(), "max-age=31536000; includeSubDomains");
+        assert_eq!(headers.get(X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(headers.get(X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), "default-src 'self'");
+        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), "1; mode=block");
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert_eq!(headers.get(PERMISSIONS_POLICY).unwrap(), "geolocation=()");
+        assert_eq!(headers.get(FEATURE_POLICY).unwrap(), "vibrate 'none'");
+    }
+
+    #[tokio::test]
+    async fn test_apply_security_headers_with_partial_config() {
+        let config = SecurityHeadersConfig {
+            strict_transport_security: Some("max-age=31536000".to_string()),
+            x_content_type_options: None,
+            x_frame_options: None,
+            content_security_policy: None,
+            x_xss_protection: None,
+            referrer_policy: None,
+            permissions_policy: None,
+            feature_policy: None,
+        };
+
+        let mut headers = HeaderMap::new();
+        apply_security_headers(&mut headers, &Some(config)).await;
+
+        assert_eq!(headers.get(STRICT_TRANSPORT_SECURITY).unwrap(), "max-age=31536000");
+        assert!(headers.get(X_CONTENT_TYPE_OPTIONS).is_none());
+        assert!(headers.get(X_FRAME_OPTIONS).is_none());
+        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), "1; mode=block");
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert!(headers.get(PERMISSIONS_POLICY).is_none());
+        assert!(headers.get(FEATURE_POLICY).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_apply_security_headers_with_empty_config() {
+        let config = SecurityHeadersConfig {
+            strict_transport_security: None,
+            x_content_type_options: None,
+            x_frame_options: None,
+            content_security_policy: None,
+            x_xss_protection: None,
+            referrer_policy: None,
+            permissions_policy: None,
+            feature_policy: None,
+        };
+
+        let mut headers = HeaderMap::new();
+        apply_security_headers(&mut headers, &Some(config)).await;
+
+        assert!(headers.get(STRICT_TRANSPORT_SECURITY).is_none());
+        assert!(headers.get(X_CONTENT_TYPE_OPTIONS).is_none());
+        assert!(headers.get(X_FRAME_OPTIONS).is_none());
+        assert_eq!(headers.get(CONTENT_SECURITY_POLICY).unwrap(), "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+        assert_eq!(headers.get(X_XSS_PROTECTION).unwrap(), "1; mode=block");
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert!(headers.get(PERMISSIONS_POLICY).is_none());
+        assert!(headers.get(FEATURE_POLICY).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_apply_security_headers_with_none_config() {
+        let mut headers = HeaderMap::new();
+        apply_security_headers(&mut headers, &None).await;
+
+        assert!(headers.get(STRICT_TRANSPORT_SECURITY).is_none());
+        assert!(headers.get(X_CONTENT_TYPE_OPTIONS).is_none());
+        assert!(headers.get(X_FRAME_OPTIONS).is_none());
+        assert!(headers.get(CONTENT_SECURITY_POLICY).is_none());
+        assert!(headers.get(X_XSS_PROTECTION).is_none());
+        assert!(headers.get(REFERRER_POLICY).is_none());
+        assert!(headers.get(PERMISSIONS_POLICY).is_none());
+        assert!(headers.get(FEATURE_POLICY).is_none());
+    }
+}
