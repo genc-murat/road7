@@ -233,8 +233,10 @@ impl HarmonicBackoffStrategy {
 
 impl RetryStrategy for HarmonicBackoffStrategy {
     fn delay(&mut self) -> Duration {
-        let divisor = self.current_attempt.try_into().unwrap_or(u32::MAX);
-        let delay = self.base_delay / divisor;
+        let divisor = self.current_attempt as u32;
+        let total_nanos = self.base_delay.as_secs() * 1_000_000_000 + self.base_delay.subsec_nanos() as u64;
+        let nanos_per_attempt = total_nanos / divisor as u64;
+        let delay = Duration::new(nanos_per_attempt / 1_000_000_000, (nanos_per_attempt % 1_000_000_000) as u32);
         self.current_attempt += 1;
         delay
     }
@@ -338,5 +340,113 @@ impl RetryConfig {
                 self.max_attempts,
             )),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_fixed_interval_backoff() {
+        let mut strategy = FixedIntervalBackoffStrategy::new(Duration::from_secs(2), 3);
+        assert_eq!(strategy.delay(), Duration::from_secs(2));
+        assert_eq!(strategy.delay(), Duration::from_secs(2));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_exponential_backoff() {
+        let mut strategy = ExponentialBackoffStrategy::new(Duration::from_secs(1), 2.0, 3);
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(1.0)));
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(2.0)));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_linear_backoff() {
+        let mut strategy = LinearBackoffStrategy::new(Duration::from_secs(1), Duration::from_secs(2), 3);
+        assert_eq!(strategy.delay(), Duration::from_secs(3));
+        assert_eq!(strategy.delay(), Duration::from_secs(5));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_random_delay_backoff() {
+        let mut strategy = RandomDelayStrategy::new(Duration::from_secs(1), Duration::from_secs(5), 3);
+        let delay = strategy.delay();
+        assert!(delay >= Duration::from_secs(1) && delay <= Duration::from_secs(5));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_incremental_backoff() {
+        let mut strategy = IncrementalBackoffStrategy::new(Duration::from_secs(1), Duration::from_secs(2), 3);
+        assert_eq!(strategy.delay(), Duration::from_secs(3));
+        assert_eq!(strategy.delay(), Duration::from_secs(5));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_fibonacci_backoff() {
+        let mut strategy = FibonacciBackoffStrategy::new(Duration::from_secs(1), 3);
+        assert_eq!(strategy.delay(), Duration::from_secs(1));
+        assert_eq!(strategy.delay(), Duration::from_secs(1));
+        assert_eq!(strategy.delay(), Duration::from_secs(2));
+        assert_eq!(strategy.delay(), Duration::from_secs(3));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_geometric_backoff() {
+        let mut strategy = GeometricBackoffStrategy::new(Duration::from_secs(1), 2.0, 3);
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(1.0)));
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(2.0)));
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_harmonic_backoff() {
+        let mut strategy = HarmonicBackoffStrategy::new(Duration::from_secs(10), 3);
+        assert_eq!(strategy.delay(), Duration::from_secs(10));
+        assert_eq!(strategy.delay(), Duration::from_secs(5));  // 10/2
+
+        let expected_delay = Duration::from_secs_f64(10.0 / 3.0);
+        let actual_delay = strategy.delay();
+        let tolerance = Duration::from_millis(100);
+
+        assert!(
+            actual_delay >= expected_delay - tolerance && actual_delay <= expected_delay + tolerance,
+            "Expected delay: {:?}, actual delay: {:?}",
+            expected_delay,
+            actual_delay
+        );
+
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_jitter_backoff() {
+        let base_strategy = ExponentialBackoffStrategy::new(Duration::from_secs(1), 2.0, 3);
+        let mut strategy = JitterBackoffStrategy::new(Box::new(base_strategy), 0.5, 3);
+        let base_delay = strategy.strategy.delay();
+        let delay = strategy.delay();
+        assert!(delay >= base_delay);
+        assert_eq!(strategy.max_attempts(), 3);
+    }
+
+    #[test]
+    fn test_retry_config_to_strategy() {
+        let config = RetryConfig {
+            strategy: "ExponentialBackoff".to_string(),
+            base_delay_seconds: 1,
+            max_attempts: 3,
+            factor: Some(2.0),
+            step_delay_seconds: None,
+        };
+        let mut strategy = config.to_strategy();
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(1.0)));
+        assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(2.0)));
+        assert_eq!(strategy.max_attempts(), 3);
     }
 }
