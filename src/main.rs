@@ -62,6 +62,7 @@ use tokio::runtime::Builder;
 use tokio::task::spawn_blocking;
 use std::sync::Mutex;
 
+const POOL_IDLE_TIMEOUT: u64 = 30;
 
 struct ProxyState {
     target_map: DashMap<
@@ -121,7 +122,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
         .pool_max_idle_per_host(config.server.pool_size)
-        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT))
         .build(https_connector);
 
     let initial_target_map = build_target_map(&config.targets);
