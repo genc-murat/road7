@@ -115,7 +115,7 @@ Static file serving offloads the delivery of static content from your backend se
 To install Road7, you need to have Rust and Cargo installed. Then, clone the repository and build the project.
 
 ```sh
-git clone https://github.com/yourusername/road7.git
+git clone https://github.com/genc-murat/road7.git
 cd road7
 cargo build --release
 ```
