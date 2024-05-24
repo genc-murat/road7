@@ -59,6 +59,11 @@ use tokio::runtime::Builder;
 use tokio::task::spawn_blocking;
 use std::sync::Mutex;
 
+
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_POOL_SIZE: usize = 10;
+const DEFAULT_WORKER_THREADS: usize = 1;
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ProxyConfig {
     server: ServerConfig,
@@ -80,11 +85,11 @@ struct ProxyConfig {
 }
 
 fn default_timeout_seconds() -> u64 {
-    30
+    DEFAULT_TIMEOUT_SECONDS
 }
 
 fn default_pool_size() -> usize {
-    10
+    DEFAULT_POOL_SIZE
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -105,7 +110,7 @@ struct RuntimeConfig {
 }
 
 fn default_worker_threads() -> usize {
-    1
+    DEFAULT_WORKER_THREADS
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
