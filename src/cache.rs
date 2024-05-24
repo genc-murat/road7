@@ -70,7 +70,7 @@ impl CacheEntry {
             CorsHeaders {
                 allow_origin: HeaderValue::from_str(config.allow_origin.as_deref().unwrap_or("*")).unwrap(),
                 allow_headers: HeaderValue::from_str(config.allow_headers.as_deref().unwrap_or("*")).unwrap(),
-                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS")).unwrap(),
+                allow_methods: HeaderValue::from_str(config.allow_methods.as_deref().unwrap_or("GET,POST,PUT,DELETE,OPTIONS,PATCH")).unwrap(),
             }
         });
 
