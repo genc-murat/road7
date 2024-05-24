@@ -1,4 +1,7 @@
-use prometheus::{Encoder, Histogram, IntCounter, IntGauge, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder, HistogramOpts};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
+};
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -64,18 +67,21 @@ impl Metrics {
         let error_counts_opts = Opts::new("error_counts", "Counts of different types of errors")
             .variable_labels(vec!["error_type".to_string()]);
         let error_counts = IntCounterVec::new(error_counts_opts, &["error_type"]).unwrap();
+        error_counts.with_label_values(&["init"]).inc(); // Initialize with a label value
         registry.register(Box::new(error_counts.clone())).unwrap();
 
         let http_method_counts = IntCounterVec::new(
             Opts::new("http_method_counts", "Number of HTTP requests by method"),
             &["method"],
         ).unwrap();
+        http_method_counts.with_label_values(&["init"]).inc(); // Initialize with a label value
         registry.register(Box::new(http_method_counts.clone())).unwrap();
 
         let status_code_counts = IntCounterVec::new(
             Opts::new("status_code_counts", "Number of HTTP responses by status code"),
             &["status_code"],
         ).unwrap();
+        status_code_counts.with_label_values(&["init"]).inc(); // Initialize with a label value
         registry.register(Box::new(status_code_counts.clone())).unwrap();
 
         let retry_counts_opts = Opts::new("retry_counts", "Total number of retries attempted");
@@ -86,6 +92,7 @@ impl Metrics {
             Opts::new("circuit_breaker_states", "Current state of circuit breakers"),
             &["state"],
         ).unwrap();
+        circuit_breaker_states.with_label_values(&["init"]).set(0); // Initialize with a label value
         registry.register(Box::new(circuit_breaker_states.clone())).unwrap();
 
         let rate_limiter_hits_opts = Opts::new("rate_limiter_hits", "Number of rate limiter hits");
@@ -104,12 +111,14 @@ impl Metrics {
             Opts::new("transform_counts", "Number of request and response transformations"),
             &["type"],
         ).unwrap();
+        transform_counts.with_label_values(&["init"]).inc(); // Initialize with a label value
         registry.register(Box::new(transform_counts.clone())).unwrap();
 
         let authentication_attempts = IntCounterVec::new(
             Opts::new("authentication_attempts", "Number of authentication attempts"),
             &["type", "status"],
         ).unwrap();
+        authentication_attempts.with_label_values(&["init", "init"]).inc(); // Initialize with label values
         registry.register(Box::new(authentication_attempts.clone())).unwrap();
 
         let timeout_counts_opts = Opts::new("timeout_counts", "Total number of request timeouts");
@@ -151,5 +160,92 @@ impl Metrics {
         let mut buffer = Vec::new();
         encoder.encode(&metric_families, &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_initialization() {
+        let metrics = Metrics::new();
+
+        // Gather the metrics and print the names for inspection
+        let metric_families = metrics.registry.gather();
+        let mut metric_names = Vec::new();
+        for family in metric_families {
+            metric_names.push(family.get_name().to_string());
+        }
+
+        println!("{:?}", metric_names);
+
+        // Verify that each metric is successfully registered by checking its presence in the registry's output
+        assert!(metric_names.contains(&"http_requests_total".to_string()));
+        assert!(metric_names.contains(&"ongoing_requests".to_string()));
+        assert!(metric_names.contains(&"http_responses_total".to_string()));
+        assert!(metric_names.contains(&"successful_requests".to_string()));
+        assert!(metric_names.contains(&"failed_requests".to_string()));
+        assert!(metric_names.contains(&"request_duration_seconds".to_string()));
+        assert!(metric_names.contains(&"request_size_bytes".to_string()));
+        assert!(metric_names.contains(&"response_size_bytes".to_string()));
+        assert!(metric_names.contains(&"error_counts".to_string()));
+        assert!(metric_names.contains(&"http_method_counts".to_string()));
+        assert!(metric_names.contains(&"status_code_counts".to_string()));
+        assert!(metric_names.contains(&"retry_counts".to_string()));
+        assert!(metric_names.contains(&"circuit_breaker_states".to_string()));
+        assert!(metric_names.contains(&"rate_limiter_hits".to_string()));
+        assert!(metric_names.contains(&"cache_hits".to_string()));
+        assert!(metric_names.contains(&"cache_misses".to_string()));
+        assert!(metric_names.contains(&"transform_counts".to_string()));
+        assert!(metric_names.contains(&"authentication_attempts".to_string()));
+        assert!(metric_names.contains(&"timeout_counts".to_string()));
+        assert!(metric_names.contains(&"connection_errors".to_string()));
+    }
+
+    #[test]
+    fn test_gather_metrics() {
+        let metrics = Metrics::new();
+
+        // Increment some metrics to simulate activity
+        metrics.http_requests_total.inc();
+        metrics.successful_requests.inc();
+        metrics.failed_requests.inc();
+        metrics.request_duration_seconds.observe(0.5);
+        metrics.request_size_bytes.observe(1024.0);
+        metrics.response_size_bytes.observe(2048.0);
+        metrics.error_counts.with_label_values(&["timeout"]).inc();
+        metrics.http_method_counts.with_label_values(&["GET"]).inc();
+        metrics.status_code_counts.with_label_values(&["200"]).inc();
+        metrics.retry_counts.inc();
+        metrics.circuit_breaker_states.with_label_values(&["open"]).set(1);
+        metrics.rate_limiter_hits.inc();
+        metrics.cache_hits.inc();
+        metrics.cache_misses.inc();
+        metrics.transform_counts.with_label_values(&["request"]).inc();
+        metrics.authentication_attempts.with_label_values(&["JWT", "success"]).inc();
+        metrics.timeout_counts.inc();
+        metrics.connection_errors.inc();
+
+        let metrics_output = metrics.gather_metrics();
+
+        assert!(metrics_output.contains("http_requests_total"));
+        assert!(metrics_output.contains("successful_requests"));
+        assert!(metrics_output.contains("failed_requests"));
+        assert!(metrics_output.contains("request_duration_seconds"));
+        assert!(metrics_output.contains("request_size_bytes"));
+        assert!(metrics_output.contains("response_size_bytes"));
+        assert!(metrics_output.contains("error_counts"));
+        assert!(metrics_output.contains("http_method_counts"));
+        assert!(metrics_output.contains("status_code_counts"));
+        assert!(metrics_output.contains("retry_counts"));
+        assert!(metrics_output.contains("circuit_breaker_states"));
+        assert!(metrics_output.contains("rate_limiter_hits"));
+        assert!(metrics_output.contains("cache_hits"));
+        assert!(metrics_output.contains("cache_misses"));
+        assert!(metrics_output.contains("transform_counts"));
+        assert!(metrics_output.contains("authentication_attempts"));
+        assert!(metrics_output.contains("timeout_counts"));
+        assert!(metrics_output.contains("connection_errors"));
     }
 }
