@@ -26,3 +26,90 @@ pub async fn validate_basic(req: &Request<Body>, valid_users: &HashMap<String, S
         _ => Err("Invalid credentials".to_string()),
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::{Body, Request, header::HeaderValue};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_validate_basic_valid_credentials() {
+        let mut valid_users = HashMap::new();
+        valid_users.insert("user1".to_string(), "password1".to_string());
+
+        let encoded_cred = base64::encode("user1:password1");
+        let auth_value = format!("Basic {}", encoded_cred);
+
+        let req = Request::builder()
+            .header(AUTHORIZATION, HeaderValue::from_str(&auth_value).unwrap())
+            .body(Body::empty())
+            .unwrap();
+
+        let result = validate_basic(&req, &valid_users).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_basic_invalid_credentials() {
+        let mut valid_users = HashMap::new();
+        valid_users.insert("user1".to_string(), "password1".to_string());
+
+        let encoded_cred = base64::encode("user1:wrongpassword");
+        let auth_value = format!("Basic {}", encoded_cred);
+
+        let req = Request::builder()
+            .header(AUTHORIZATION, HeaderValue::from_str(&auth_value).unwrap())
+            .body(Body::empty())
+            .unwrap();
+
+        let result = validate_basic(&req, &valid_users).await;
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Invalid credentials");
+    }
+
+    #[tokio::test]
+    async fn test_validate_basic_missing_header() {
+        let valid_users = HashMap::new();
+
+        let req = Request::builder()
+            .body(Body::empty())
+            .unwrap();
+
+        let result = validate_basic(&req, &valid_users).await;
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Authorization header missing");
+    }
+
+    #[tokio::test]
+    async fn test_validate_basic_invalid_scheme() {
+        let valid_users = HashMap::new();
+
+        let encoded_cred = base64::encode("user1:password1");
+        let auth_value = format!("Bearer {}", encoded_cred);
+
+        let req = Request::builder()
+            .header(AUTHORIZATION, HeaderValue::from_str(&auth_value).unwrap())
+            .body(Body::empty())
+            .unwrap();
+
+        let result = validate_basic(&req, &valid_users).await;
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Invalid authorization scheme");
+    }
+
+    #[tokio::test]
+    async fn test_validate_basic_invalid_base64() {
+        let valid_users = HashMap::new();
+
+        let auth_value = "Basic invalid_base64";
+
+        let req = Request::builder()
+            .header(AUTHORIZATION, HeaderValue::from_str(auth_value).unwrap())
+            .body(Body::empty())
+            .unwrap();
+
+        let result = validate_basic(&req, &valid_users).await;
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Failed to decode base64 credentials");
+    }
+}
