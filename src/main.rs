@@ -159,6 +159,23 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                 },
             ).await;
         }
+
+        if let Some(endpoints) = &target.endpoints {
+            for endpoint in endpoints {
+                if let Some(rate_limiter_config) = &endpoint.rate_limiter_config {
+                    let full_path = format!("{}{}", target.path, endpoint.path);
+                    rate_limiters.add_limiter(
+                        full_path,
+                        RateLimiterConfig {
+                            capacity: rate_limiter_config.capacity,
+                            burst_capacity: rate_limiter_config.burst_capacity,
+                            max_rate: rate_limiter_config.max_rate,
+                            period: Duration::from_secs(rate_limiter_config.every.unwrap_or(1)),
+                        },
+                    ).await;
+                }
+            }
+        }
     }
 
     let proxy_state = Arc::new(ProxyState {
@@ -338,6 +355,11 @@ where
             .header("Content-Type", "text/plain; charset=utf-8")
             .body(Body::from(metrics_data))
             .unwrap());
+    }
+
+    if path == "/rate-limiter-status" {
+        info!(request_id = %request_id, "Rate limiter status request received.");
+        return rate_limiter_status_handler(proxy_state.rate_limiters.clone()).await;
     }
 
     info!(request_id = %request_id, "Handling request for path: {}", path);
@@ -848,4 +870,16 @@ async fn serve_static_file(path: &str) -> Result<Response<Body>, hyper::Error> {
             .body(Body::from("File not found"))
             .unwrap()),
     }
+}
+
+async fn rate_limiter_status_handler(
+    rate_limiters: Arc<RateLimiterManager>,
+) -> Result<Response<Body>, hyper::Error> {
+    let statuses = rate_limiters.get_all_statuses().await;
+    let body = serde_json::to_string(&statuses).unwrap();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .unwrap())
 }

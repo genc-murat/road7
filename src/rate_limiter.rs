@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration, Instant};
 use std::collections::HashMap;
@@ -18,6 +19,16 @@ pub struct RateLimiter {
     last_refill: RwLock<Instant>,
 }
 
+#[derive(Serialize)]
+pub struct RateLimiterStatus {
+    capacity: usize,
+    burst_capacity: usize,
+    tokens: usize,
+    max_rate: usize,
+    period: Duration,
+    last_refill: String,  // Convert to String for better readability
+}
+
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -25,6 +36,20 @@ impl RateLimiter {
             last_refill: RwLock::new(Instant::now()),
             config,
         })
+    }
+
+    pub async fn status(&self) -> RateLimiterStatus {
+        let tokens = *self.tokens.read().await;
+        let last_refill = *self.last_refill.read().await;
+
+        RateLimiterStatus {
+            capacity: self.config.capacity,
+            burst_capacity: self.config.burst_capacity,
+            tokens,
+            max_rate: self.config.max_rate,
+            period: self.config.period,
+            last_refill: format!("{:?}", last_refill),
+        }
     }
 
     pub async fn acquire(&self) -> bool {
@@ -91,4 +116,14 @@ impl RateLimiterManager {
         let mut limiters = self.limiters.write().await;
         limiters.insert(target, RateLimiter::new(config));
     }
+
+    pub async fn get_all_statuses(&self) -> HashMap<String, RateLimiterStatus> { // Add this method
+        let limiters = self.limiters.read().await;
+        let mut statuses = HashMap::new();
+        for (path, limiter) in limiters.iter() {
+            statuses.insert(path.clone(), limiter.status().await);
+        }
+        statuses
+    }
 }
+

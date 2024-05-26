@@ -56,6 +56,13 @@ fn default_worker_threads() -> usize {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Endpoint {
+    pub path: String,
+    pub rate_limiter_config: Option<RateLimiterConfig>,
+}
+
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Target {
     pub path: String,
     pub urls: Vec<String>,
@@ -71,6 +78,7 @@ pub struct Target {
     pub logging_config: Option<LoggingConfig>,
     pub cors_config: Option<CorsConfig>,
     pub rate_limiter_config: Option<RateLimiterConfig>,
+    pub endpoints: Option<Vec<Endpoint>>, 
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
