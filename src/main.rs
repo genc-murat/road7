@@ -101,35 +101,118 @@ impl ProxyState {
     }
 }
 
+struct ProxyStateBuilder {
+    target_map: Option<DashMap<String, (
+        Vec<String>,
+        Option<AuthenticationConfig>,
+        Option<RetryConfig>,
+        Option<Vec<Transform>>,
+        Option<Vec<Transform>>,
+        Option<CircuitBreakerConfig>,
+        Option<String>,
+        Option<HashMap<String, String>>,
+        Option<CacheConfig>,
+        Option<u64>,
+        Option<LoggingConfig>,
+        Option<CorsConfig>,
+    )>>,
+    circuit_breakers: Option<DashMap<String, Arc<RwLock<CircuitBreaker>>>>,
+    caches: Option<DashMap<String, Cache>>,
+    concurrency_limiter: Option<Arc<Semaphore>>,
+    ongoing_requests: Option<Arc<AtomicUsize>>,
+    metrics: Option<Arc<metrics::Metrics>>,
+    default_cors_config: Option<Option<CorsConfig>>,
+    load_balancer: Option<Option<Arc<RwLock<LoadBalancer>>>>,
+    bot_detector: Option<Option<Arc<BotDetectorConfig>>>,
+    rate_limiters: Option<Arc<RateLimiterManager>>,
+}
+
+impl ProxyStateBuilder {
+    fn new() -> Self {
+        Self {
+            target_map: None,
+            circuit_breakers: None,
+            caches: None,
+            concurrency_limiter: None,
+            ongoing_requests: None,
+            metrics: None,
+            default_cors_config: None,
+            load_balancer: None,
+            bot_detector: None,
+            rate_limiters: None,
+        }
+    }
+
+    fn with_target_map(mut self, targets: &[Target]) -> Self {
+        self.target_map = Some(build_target_map(targets));
+        self
+    }
+
+    fn with_circuit_breakers(mut self, circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>) -> Self {
+        self.circuit_breakers = Some(circuit_breakers);
+        self
+    }
+
+    fn with_caches(mut self, caches: DashMap<String, Cache>) -> Self {
+        self.caches = Some(caches);
+        self
+    }
+
+    fn with_concurrency_limiter(mut self, concurrency_limiter: Arc<Semaphore>) -> Self {
+        self.concurrency_limiter = Some(concurrency_limiter);
+        self
+    }
+
+    fn with_ongoing_requests(mut self, ongoing_requests: Arc<AtomicUsize>) -> Self {
+        self.ongoing_requests = Some(ongoing_requests);
+        self
+    }
+
+    fn with_metrics(mut self, metrics: Arc<metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn with_default_cors_config(mut self, default_cors_config: Option<CorsConfig>) -> Self {
+        self.default_cors_config = Some(default_cors_config);
+        self
+    }
+
+    fn with_load_balancer(mut self, load_balancer: Option<Arc<RwLock<LoadBalancer>>>) -> Self {
+        self.load_balancer = Some(load_balancer);
+        self
+    }
+
+    fn with_bot_detector(mut self, bot_detector: Option<Arc<BotDetectorConfig>>) -> Self {
+        self.bot_detector = Some(bot_detector);
+        self
+    }
+
+    fn with_rate_limiters(mut self, rate_limiters: Arc<RateLimiterManager>) -> Self {
+        self.rate_limiters = Some(rate_limiters);
+        self
+    }
+
+    fn build(self) -> ProxyState {
+        ProxyState {
+            target_map: self.target_map.expect("target_map is required"),
+            circuit_breakers: self.circuit_breakers.expect("circuit_breakers are required"),
+            caches: self.caches.expect("caches are required"),
+            concurrency_limiter: self.concurrency_limiter.expect("concurrency_limiter is required"),
+            ongoing_requests: self.ongoing_requests.expect("ongoing_requests are required"),
+            metrics: self.metrics.expect("metrics are required"),
+            default_cors_config: self.default_cors_config.expect("default_cors_config is required"),
+            load_balancer: self.load_balancer.expect("load_balancer is required"),
+            bot_detector: self.bot_detector.expect("bot_detector is required"),
+            rate_limiters: self.rate_limiters.expect("rate_limiters are required"),
+        }
+    }
+}
+
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(metrics::Metrics::new());
-
-    let addr = format!("{}:{}", config.server.host, config.server.port)
-        .parse::<SocketAddr>()?;
-
     let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size));
     let ongoing_requests = Arc::new(AtomicUsize::new(0));
-
-    let retry_config = Arc::new(config.retries);
-    let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
-    let default_timeout_seconds = config.default_timeout_seconds;
-    let security_headers_config = Arc::new(config.security_headers_config.clone());
-    let default_cors_config = config.default_cors_config.clone();
-
-    let mut http_connector = HttpConnector::new();
-    if let Some(recv_buffer_size) = config.server.recv_buffer_size {
-        http_connector.set_recv_buffer_size(Some(recv_buffer_size));
-    }
-    if let Some(send_buffer_size) = config.server.send_buffer_size {
-        http_connector.set_send_buffer_size(Some(send_buffer_size));
-    }
-
-    let https_connector = HttpsConnector::new();
-
-    let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
-        .pool_max_idle_per_host(config.server.pool_size)
-        .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT))
-        .build(https_connector);
 
     let initial_target_map = build_target_map(&config.targets);
 
@@ -185,26 +268,44 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
-    let proxy_state = Arc::new(ProxyState {
-        target_map: initial_target_map,
-        circuit_breakers: DashMap::new(),
-        caches,
-        concurrency_limiter: concurrency_limiter.clone(),
-        ongoing_requests: ongoing_requests.clone(),
-        metrics: metrics.clone(),
-        default_cors_config,
-        load_balancer,
-        bot_detector, 
-        rate_limiters,
-    });
+    let proxy_state = Arc::new(ProxyStateBuilder::new()
+    .with_target_map(&config.targets)
+    .with_circuit_breakers(DashMap::new())
+    .with_caches(caches)
+    .with_concurrency_limiter(concurrency_limiter.clone())
+    .with_ongoing_requests(ongoing_requests.clone())
+    .with_metrics(metrics.clone())
+    .with_default_cors_config(config.default_cors_config.clone())
+    .with_load_balancer(load_balancer)
+    .with_bot_detector(bot_detector)
+    .with_rate_limiters(rate_limiters)
+    .build());
+
+
+    let addr = format!("{}:{}", config.server.host, config.server.port)
+        .parse::<SocketAddr>()?;
+
+    let mut http_connector = HttpConnector::new();
+    if let Some(recv_buffer_size) = config.server.recv_buffer_size {
+        http_connector.set_recv_buffer_size(Some(recv_buffer_size));
+    }
+    if let Some(send_buffer_size) = config.server.send_buffer_size {
+        http_connector.set_send_buffer_size(Some(send_buffer_size));
+    }
+
+    let https_connector = HttpsConnector::new();
+
+    let client: Client<HttpsConnector<HttpConnector>> = Client::builder()
+        .pool_max_idle_per_host(config.server.pool_size)
+        .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT))
+        .build(https_connector);
 
     let make_svc = {
         let proxy_state = Arc::clone(&proxy_state);
-        let retry_config = Arc::clone(&retry_config);
-        let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-        let client = client.clone();
-        let security_headers_config = Arc::clone(&security_headers_config);
-        let metrics = metrics.clone();
+        let retry_config = Arc::new(config.retries);
+        let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
+        let default_timeout_seconds = config.default_timeout_seconds;
+        let security_headers_config = Arc::new(config.security_headers_config.clone());
 
         make_service_fn(move |conn: &AddrStream| {
             let proxy_state = Arc::clone(&proxy_state);
@@ -212,7 +313,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
             let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
             let client = client.clone();
             let security_headers_config = Arc::clone(&security_headers_config);
-            let metrics = metrics.clone();
 
             let client_ip = conn.remote_addr();
 
@@ -223,13 +323,12 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                     let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
                     let client = client.clone();
                     let security_headers_config = Arc::clone(&security_headers_config);
-                    let metrics = metrics.clone();
 
                     async move {
                         proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
-                        metrics.http_requests_total.inc();
+                        proxy_state.metrics.http_requests_total.inc();
                         proxy_state.metrics.ongoing_requests.inc();
-                        metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
+                        proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
 
                         if let Some(bot_detector) = &proxy_state.bot_detector {
                             if is_bot_request(&req, bot_detector) {
@@ -276,6 +375,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
+
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
@@ -317,6 +417,7 @@ fn build_target_map(
     }
     map
 }
+
 async fn proxy_request<C>(
     mut original_req: Request<Body>,
     client_ip: SocketAddr,
@@ -684,7 +785,6 @@ where
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
 
-
 fn find_target<'a>(
     proxy_state: &'a ProxyState,
     path: &str,
@@ -764,7 +864,6 @@ fn find_target<'a>(
     }
     target
 }
-
 
 async fn rebuild_request(
     original_req: &mut Request<Body>,
