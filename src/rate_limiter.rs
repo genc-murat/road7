@@ -15,17 +15,14 @@ pub struct RateLimiter {
     config: RateLimiterConfig,
     tokens: RwLock<usize>,
     last_refill: RwLock<Instant>,
-    leak_rate: usize,
 }
 
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
-        let leak_rate = config.max_rate / config.period.as_secs() as usize;
         Arc::new(Self {
             tokens: RwLock::new(config.capacity),
             last_refill: RwLock::new(Instant::now()),
             config,
-            leak_rate,
         })
     }
 
@@ -34,15 +31,17 @@ impl RateLimiter {
         let mut last_refill = self.last_refill.write().await;
 
         let elapsed = last_refill.elapsed();
+        let leak_rate = self.config.max_rate as f64 / self.config.period.as_secs_f64();
+        let leaked_tokens = (elapsed.as_secs_f64() * leak_rate).min(*tokens as f64) as usize;
+
+        *tokens = tokens.saturating_sub(leaked_tokens).min(self.config.capacity);
         if elapsed >= self.config.period {
             *tokens = self.config.capacity;
             *last_refill = Instant::now();
             info!("Refilled tokens to capacity: {}", self.config.capacity);
         } else {
-            // Leak tokens based on elapsed time
-            let leaked_tokens = (elapsed.as_secs() as usize * self.leak_rate).min(*tokens);
-            *tokens -= leaked_tokens;
-            info!("Leaked tokens: {}", leaked_tokens);
+            *last_refill += Duration::from_secs_f64(leaked_tokens as f64 / leak_rate);
+            info!("Leaked tokens: {}, remaining tokens: {}", leaked_tokens, *tokens);
         }
 
         if *tokens > 0 {
@@ -55,6 +54,7 @@ impl RateLimiter {
         }
     }
 }
+
 pub struct RateLimiterManager {
     limiters: RwLock<HashMap<String, Arc<RateLimiter>>>,
 }
