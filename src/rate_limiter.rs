@@ -15,14 +15,17 @@ pub struct RateLimiter {
     config: RateLimiterConfig,
     tokens: RwLock<usize>,
     last_refill: RwLock<Instant>,
+    leak_rate: usize,
 }
 
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
+        let leak_rate = config.max_rate / config.period.as_secs() as usize;
         Arc::new(Self {
             tokens: RwLock::new(config.capacity),
             last_refill: RwLock::new(Instant::now()),
             config,
+            leak_rate,
         })
     }
 
@@ -35,6 +38,11 @@ impl RateLimiter {
             *tokens = self.config.capacity;
             *last_refill = Instant::now();
             info!("Refilled tokens to capacity: {}", self.config.capacity);
+        } else {
+            // Leak tokens based on elapsed time
+            let leaked_tokens = (elapsed.as_secs() as usize * self.leak_rate).min(*tokens);
+            *tokens -= leaked_tokens;
+            info!("Leaked tokens: {}", leaked_tokens);
         }
 
         if *tokens > 0 {
@@ -47,7 +55,6 @@ impl RateLimiter {
         }
     }
 }
-
 pub struct RateLimiterManager {
     limiters: RwLock<HashMap<String, Arc<RateLimiter>>>,
 }
