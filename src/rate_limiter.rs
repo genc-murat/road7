@@ -51,14 +51,14 @@ impl RateLimiter {
 
     fn start_refill_task(self: &Arc<Self>) {
         let limiter = self.clone();
-        let start = Instant::now() + limiter.config.period;
+        let interval_duration = limiter.config.period / (limiter.config.max_rate as u32);
         tokio::spawn(async move {
-            let mut interval = time::interval_at(start, limiter.config.period);
+            let mut interval = time::interval(interval_duration);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let mut tokens = limiter.tokens.write().await;
-                        *tokens = (*tokens + limiter.config.max_rate).min(limiter.config.capacity + limiter.config.burst_capacity);
+                        *tokens = (*tokens + 1).min(limiter.config.capacity + limiter.config.burst_capacity);
                         *limiter.last_refill.write().await = Instant::now();
                         info!("Tokens refilled. Current tokens: {}", *tokens);
                     },
