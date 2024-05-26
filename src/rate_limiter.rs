@@ -17,6 +17,7 @@ pub struct RateLimiter {
     config: RateLimiterConfig,
     tokens: RwLock<usize>,
     last_refill: RwLock<Instant>,
+    last_acquire: RwLock<Instant>, // Son başarılı alma zamanını izlemek için
 }
 
 #[derive(Serialize)]
@@ -26,7 +27,8 @@ pub struct RateLimiterStatus {
     tokens: usize,
     max_rate: usize,
     period: Duration,
-    last_refill: String,  // Convert to String for better readability
+    last_refill: String,  // Daha iyi okunabilirlik için String'e dönüştürün
+    last_acquire: String, // Daha iyi okunabilirlik için String'e dönüştürün
 }
 
 impl RateLimiter {
@@ -34,6 +36,7 @@ impl RateLimiter {
         let limiter = Arc::new(Self {
             tokens: RwLock::new(config.capacity + config.burst_capacity),
             last_refill: RwLock::new(Instant::now()),
+            last_acquire: RwLock::new(Instant::now()),
             config,
         });
         limiter.start_refill_task();
@@ -49,7 +52,7 @@ impl RateLimiter {
                 let mut tokens = limiter.tokens.write().await;
                 *tokens = limiter.config.capacity + limiter.config.burst_capacity;
                 *limiter.last_refill.write().await = Instant::now();
-                info!("Refilled tokens to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
+                info!("Tokens refilled to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
             }
         });
     }
@@ -57,6 +60,7 @@ impl RateLimiter {
     pub async fn status(&self) -> RateLimiterStatus {
         let tokens = *self.tokens.read().await;
         let last_refill = *self.last_refill.read().await;
+        let last_acquire = *self.last_acquire.read().await;
 
         RateLimiterStatus {
             capacity: self.config.capacity,
@@ -65,20 +69,26 @@ impl RateLimiter {
             max_rate: self.config.max_rate,
             period: self.config.period,
             last_refill: format!("{:?}", last_refill),
+            last_acquire: format!("{:?}", last_acquire),
         }
     }
 
-    pub async fn acquire(&self) -> bool {
+    pub async fn acquire(&self) -> Result<(), RateLimitError> {
         let mut tokens = self.tokens.write().await;
         if *tokens > 0 {
             *tokens -= 1;
+            *self.last_acquire.write().await = Instant::now();
             info!("Token acquired, remaining tokens: {}", *tokens);
-            true
+            Ok(())
         } else {
-            error!("Rate limit exceeded, request denied");
-            false
+            Err(RateLimitError::Exhausted)
         }
     }
+}
+
+#[derive(Debug)]
+pub enum RateLimitError {
+    Exhausted,
 }
 
 pub struct RateLimiterManager {
@@ -96,12 +106,12 @@ impl RateLimiterManager {
         let limiters = self.limiters.read().await;
         info!("Checking rate limiter for target: {}", target);
 
-        // Try exact match
+        // Tam eşleşmeyi deneyin
         if let Some(limiter) = limiters.get(target) {
             return Some(limiter.clone());
         }
 
-        // Try prefix match
+        // Önek eşleşmesini deneyin
         for (path, limiter) in limiters.iter() {
             if target.starts_with(path) {
                 info!("Rate limiter found for path prefix: {}", path);
@@ -114,7 +124,13 @@ impl RateLimiterManager {
 
     pub async fn add_limiter(&self, target: String, config: RateLimiterConfig) {
         let mut limiters = self.limiters.write().await;
-        limiters.insert(target, RateLimiter::new(config));
+        // Eşleşen bir hedef varsa mevcut limitleyiciyi güncelleyin
+        if let Some(existing_limiter) = limiters.get_mut(&target) {
+            // Mevcut limitleyiciyi yeni yapılandırmayla güncelleyin
+            *existing_limiter = RateLimiter::new(config);
+        } else {
+            limiters.insert(target, RateLimiter::new(config));
+        }
     }
 
     pub async fn get_all_statuses(&self) -> HashMap<String, RateLimiterStatus> {

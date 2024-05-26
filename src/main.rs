@@ -21,7 +21,7 @@ use crate::config::{read_config, AuthenticationType};
 use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
-use crate::rate_limiter::RateLimiterConfig;
+use crate::rate_limiter::{RateLimitError, RateLimiterConfig};
 use crate::security_headers::apply_security_headers;
 use crate::validate::validate_request;
 use crate::bot_detector::{is_bot_request, BotDetectorConfig};
@@ -399,13 +399,23 @@ where
     info!(request_id = %request_id, "Checking rate limiter for path: {}", path);
     if let Some(rate_limiter) = proxy_state.rate_limiters.get_limiter(&path).await {
         info!(request_id = %request_id, "Rate limiter found for path: {}", path);
-        if !rate_limiter.acquire().await {
-            error!(request_id = %request_id, "Rate limit exceeded for path: {}", path);
-            return Ok(ProxyError::TooManyRequests("Rate limit exceeded".to_string()).into());
+        match rate_limiter.acquire().await {
+            Ok(_) => {
+                // Successfully acquired a token
+            }
+            Err(RateLimitError::Exhausted) => {
+                error!(request_id = %request_id, "Rate limit exceeded for path: {}", path);
+                return Ok(ProxyError::TooManyRequests("Rate limit exceeded".to_string()).into());
+            }
+            Err(e) => {
+                error!(request_id = %request_id, "Unexpected error: {:?}", e);
+                return Ok(ProxyError::InternalServerError("Unexpected error occurred".to_string()).into());
+            }
         }
     } else {
         info!(request_id = %request_id, "No rate limiter configured for path: {}", path);
     }
+    
 
     if let Some(auth_config) = auth_config {
         match auth_config.auth_type {
