@@ -405,11 +405,12 @@ where
     };
 
     info!(request_id = %request_id, "Checking rate limiter for path: {}", path);
+
     if let Some(rate_limiter) = proxy_state.rate_limiters.get_limiter(&path).await {
         info!(request_id = %request_id, "Rate limiter found for path: {}", path);
         match rate_limiter.acquire().await {
             Ok(_) => {
-                // Successfully acquired a token
+                info!(request_id = %request_id, "Token acquired, proceeding with request processing.");
             }
             Err(RateLimitError::Exhausted) => {
                 error!(request_id = %request_id, "Rate limit exceeded for path: {}", path);
@@ -420,10 +421,7 @@ where
                 return Ok(ProxyError::InternalServerError("Unexpected error occurred".to_string()).into());
             }
         }
-    } else {
-        info!(request_id = %request_id, "No rate limiter configured for path: {}", path);
     }
-    
 
     if let Some(auth_config) = auth_config {
         match auth_config.auth_type {
