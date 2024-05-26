@@ -34,6 +34,10 @@ pub struct RateLimiterStatus {
 
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
+        if config.capacity == 0 || config.max_rate == 0 {
+            panic!("Invalid RateLimiterConfig: capacity and max_rate must be greater than 0");
+        }
+
         let limiter = Arc::new(Self {
             tokens: RwLock::new(config.capacity + config.burst_capacity),
             last_refill: RwLock::new(Instant::now()),
@@ -59,7 +63,7 @@ impl RateLimiter {
                         info!("Tokens refilled. Current tokens: {}", *tokens);
                     },
                     _ = limiter.shutdown.notified() => {
-                        info!("Rate limiter shutdown.");
+                        info!("Rate limiter shutdown initiated.");
                         break;
                     }
                 }
@@ -98,6 +102,7 @@ impl RateLimiter {
 
     pub async fn shutdown(&self) {
         self.shutdown.notify_waiters();
+        info!("Rate limiter shutdown completed.");
     }
 }
 
@@ -140,9 +145,11 @@ impl RateLimiterManager {
         if let Some(existing_limiter) = limiters.get_mut(&target) {
             *existing_limiter = RateLimiter::new(config);
         } else {
-            limiters.insert(target, RateLimiter::new(config));
+            limiters.insert(target.clone(), RateLimiter::new(config));
         }
+        info!("Rate limiter added for target: {}", target);
     }
+    
 
     pub async fn get_all_statuses(&self) -> HashMap<String, RateLimiterStatus> {
         let limiters = self.limiters.read().await;
@@ -158,5 +165,6 @@ impl RateLimiterManager {
         for limiter in limiters.values() {
             limiter.shutdown().await;
         }
+        info!("All rate limiters have been shut down.");
     }
 }
