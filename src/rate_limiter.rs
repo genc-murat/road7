@@ -31,11 +31,27 @@ pub struct RateLimiterStatus {
 
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
-        Arc::new(Self {
+        let limiter = Arc::new(Self {
             tokens: RwLock::new(config.capacity + config.burst_capacity),
             last_refill: RwLock::new(Instant::now()),
             config,
-        })
+        });
+        limiter.start_refill_task();
+        limiter
+    }
+
+    fn start_refill_task(self: &Arc<Self>) {
+        let limiter = self.clone();
+        tokio::spawn(async move {
+            let mut interval = time::interval(limiter.config.period);
+            loop {
+                interval.tick().await;
+                let mut tokens = limiter.tokens.write().await;
+                *tokens = limiter.config.capacity + limiter.config.burst_capacity;
+                *limiter.last_refill.write().await = Instant::now();
+                info!("Refilled tokens to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
+            }
+        });
     }
 
     pub async fn status(&self) -> RateLimiterStatus {
@@ -54,22 +70,6 @@ impl RateLimiter {
 
     pub async fn acquire(&self) -> bool {
         let mut tokens = self.tokens.write().await;
-        let mut last_refill = self.last_refill.write().await;
-
-        let elapsed = last_refill.elapsed();
-        let leak_rate = self.config.max_rate as f64 / self.config.period.as_secs_f64();
-        let leaked_tokens = (elapsed.as_secs_f64() * leak_rate).min(*tokens as f64) as usize;
-
-        *tokens = tokens.saturating_sub(leaked_tokens).min(self.config.capacity + self.config.burst_capacity);
-        if elapsed >= self.config.period {
-            *tokens = self.config.capacity + self.config.burst_capacity;
-            *last_refill = Instant::now();
-            info!("Refilled tokens to capacity: {}", self.config.capacity + self.config.burst_capacity);
-        } else {
-            *last_refill += Duration::from_secs_f64(leaked_tokens as f64 / leak_rate);
-            info!("Leaked tokens: {}, remaining tokens: {}", leaked_tokens, *tokens);
-        }
-
         if *tokens > 0 {
             *tokens -= 1;
             info!("Token acquired, remaining tokens: {}", *tokens);
@@ -117,7 +117,7 @@ impl RateLimiterManager {
         limiters.insert(target, RateLimiter::new(config));
     }
 
-    pub async fn get_all_statuses(&self) -> HashMap<String, RateLimiterStatus> { // Add this method
+    pub async fn get_all_statuses(&self) -> HashMap<String, RateLimiterStatus> {
         let limiters = self.limiters.read().await;
         let mut statuses = HashMap::new();
         for (path, limiter) in limiters.iter() {
@@ -126,4 +126,3 @@ impl RateLimiterManager {
         statuses
     }
 }
-
