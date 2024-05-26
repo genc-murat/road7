@@ -30,7 +30,14 @@ pub struct CacheConfig {
     pub max_size: usize,
     #[serde(default = "default_serialize")]
     pub serialize: bool,
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_seconds: u64,
 }
+
+fn default_cleanup_interval() -> u64 {
+    60
+}
+
 
 fn default_serialize() -> bool {
     false
@@ -109,10 +116,11 @@ impl Cache {
         };
 
         let cache_clone = cache.clone();
+        let cleanup_interval = Duration::from_secs(config.cleanup_interval_seconds);
         tokio::spawn(async move {
             loop {
                 cache_clone.clean_expired_entries().await;
-                sleep(Duration::from_secs(60)).await;
+                sleep(cleanup_interval).await;
             }
         });
 
@@ -136,7 +144,13 @@ impl Cache {
     pub async fn put(&self, key: String, response: CacheEntry) {
         let entry = CacheEntry {
             response: if self.serialize {
-                serde_json::to_vec(&response.response).unwrap_or_else(|_| response.response.clone())
+                match serde_json::to_vec(&response.response) {
+                    Ok(serialized) => serialized,
+                    Err(err) => {
+                        warn!("Failed to serialize cache entry: {}", err);
+                        response.response.clone()
+                    }
+                }
             } else {
                 response.response
             },
