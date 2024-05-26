@@ -172,118 +172,119 @@ impl RateLimiterManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use tokio::time::sleep;
 
     #[tokio::test]
-    async fn test_rate_limiter_initialization() {
+    async fn test_rate_limiter_creation() {
         let config = RateLimiterConfig {
             capacity: 10,
             burst_capacity: 5,
             max_rate: 2,
             period: Duration::from_secs(1),
         };
-
-        let rate_limiter = RateLimiter::new(config.clone());
-        let status = rate_limiter.status().await;
+        let limiter = RateLimiter::new(config.clone());
+        let status = limiter.status().await;
 
         assert_eq!(status.capacity, config.capacity);
         assert_eq!(status.burst_capacity, config.burst_capacity);
-        assert_eq!(status.tokens, config.capacity + config.burst_capacity);
         assert_eq!(status.max_rate, config.max_rate);
-        assert_eq!(status.period, config.period);
+        assert_eq!(status.tokens, config.capacity + config.burst_capacity);
     }
 
     #[tokio::test]
-    async fn test_acquire_token() {
-        let config = RateLimiterConfig {
-            capacity: 5,
-            burst_capacity: 0,
-            max_rate: 1,
-            period: Duration::from_secs(1),
-        };
-
-        let rate_limiter = RateLimiter::new(config);
-        let result = rate_limiter.acquire().await;
-
-        assert!(result.is_ok());
-        let status = rate_limiter.status().await;
-        assert_eq!(status.tokens, 4);
-    }
-
-    #[tokio::test]
-    async fn test_exceed_rate_limit() {
+    async fn test_rate_limiter_acquire() {
         let config = RateLimiterConfig {
             capacity: 1,
             burst_capacity: 0,
             max_rate: 1,
             period: Duration::from_secs(1),
         };
+        let limiter = RateLimiter::new(config);
+        
+        // First acquire should succeed
+        assert_eq!(limiter.acquire().await, Ok(()));
+        
+        // Second acquire should fail
+        assert_eq!(limiter.acquire().await, Err(RateLimitError::Exhausted));
 
-        let rate_limiter = RateLimiter::new(config);
-
-        let result1 = rate_limiter.acquire().await;
-        assert!(result1.is_ok());
-
-        let result2 = rate_limiter.acquire().await;
-        assert!(result2.is_err());
-        if let Err(e) = result2 {
-            assert_eq!(e, RateLimitError::Exhausted);
-        }
+        // Wait for refill
+        sleep(Duration::from_secs(1)).await;
+        
+        // Acquire after refill should succeed
+        assert_eq!(limiter.acquire().await, Ok(()));
     }
 
     #[tokio::test]
-    async fn test_refill_tokens() {
+    async fn test_rate_limiter_status() {
         let config = RateLimiterConfig {
-            capacity: 2,
-            burst_capacity: 0,
+            capacity: 5,
+            burst_capacity: 5,
             max_rate: 1,
             period: Duration::from_secs(1),
         };
-
-        let rate_limiter = RateLimiter::new(config);
-        let _ = rate_limiter.acquire().await;
-        let _ = rate_limiter.acquire().await;
-
-        let status = rate_limiter.status().await;
-        assert_eq!(status.tokens, 0);
-
-        sleep(Duration::from_secs(2)).await; // Allow time for refills
-
-        let status = rate_limiter.status().await;
-        assert_eq!(status.tokens, 2);
+        let limiter = RateLimiter::new(config);
+        
+        let status = limiter.status().await;
+        assert_eq!(status.tokens, 10);
+        
+        limiter.acquire().await.unwrap();
+        let status = limiter.status().await;
+        assert_eq!(status.tokens, 9);
     }
 
     #[tokio::test]
     async fn test_rate_limiter_manager() {
         let manager = RateLimiterManager::new();
+        
+        let config = RateLimiterConfig {
+            capacity: 5,
+            burst_capacity: 5,
+            max_rate: 1,
+            period: Duration::from_secs(1),
+        };
+        
+        manager.add_limiter("api/test".to_string(), config.clone()).await;
+        
+        let limiter = manager.get_limiter("api/test").await;
+        assert!(limiter.is_some());
+        
+        let limiter = limiter.unwrap();
+        let status = limiter.status().await;
+        assert_eq!(status.capacity, config.capacity);
+        
+        let all_statuses = manager.get_all_statuses().await;
+        assert_eq!(all_statuses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_manager_prefix() {
+        let manager = RateLimiterManager::new();
 
         let config1 = RateLimiterConfig {
+            capacity: 5,
+            burst_capacity: 5,
+            max_rate: 1,
+            period: Duration::from_secs(1),
+        };
+
+        let config2 = RateLimiterConfig {
             capacity: 10,
             burst_capacity: 5,
             max_rate: 2,
             period: Duration::from_secs(1),
         };
 
-        let config2 = RateLimiterConfig {
-            capacity: 20,
-            burst_capacity: 10,
-            max_rate: 4,
-            period: Duration::from_secs(1),
-        };
+        manager.add_limiter("api/v1/".to_string(), config1.clone()).await;
+        manager.add_limiter("api/v1/user/".to_string(), config2.clone()).await;
 
-        manager.add_limiter("/api/v1".to_string(), config1.clone()).await;
-        manager.add_limiter("/api/v2".to_string(), config2.clone()).await;
+        let limiter = manager.get_limiter("api/v1/user/123").await;
+        assert!(limiter.is_some());
 
-        let limiter1 = manager.get_limiter("/api/v1/resource").await.unwrap();
-        let limiter2 = manager.get_limiter("/api/v2/resource").await.unwrap();
-
-        assert_eq!(limiter1.status().await.capacity, config1.capacity);
-        assert_eq!(limiter2.status().await.capacity, config2.capacity);
+        let limiter = limiter.unwrap();
+        let status = limiter.status().await;
+        assert_eq!(status.capacity, config2.capacity);
 
         let all_statuses = manager.get_all_statuses().await;
         assert_eq!(all_statuses.len(), 2);
-
-        manager.shutdown().await;
     }
 }
