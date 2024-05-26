@@ -193,19 +193,19 @@ impl ProxyStateBuilder {
         self
     }
 
-    fn build(self) -> ProxyState {
-        ProxyState {
-            target_map: self.target_map.expect("target_map is required"),
-            circuit_breakers: self.circuit_breakers.expect("circuit_breakers are required"),
-            caches: self.caches.expect("caches are required"),
-            concurrency_limiter: self.concurrency_limiter.expect("concurrency_limiter is required"),
-            ongoing_requests: self.ongoing_requests.expect("ongoing_requests are required"),
-            metrics: self.metrics.expect("metrics are required"),
-            default_cors_config: self.default_cors_config.expect("default_cors_config is required"),
-            load_balancer: self.load_balancer.expect("load_balancer is required"),
-            bot_detector: self.bot_detector.expect("bot_detector is required"),
-            rate_limiters: self.rate_limiters.expect("rate_limiters are required"),
-        }
+    fn build(self) -> Result<ProxyState, &'static str> {
+        Ok(ProxyState {
+            target_map: self.target_map.ok_or("target_map is required")?,
+            circuit_breakers: self.circuit_breakers.ok_or("circuit_breakers are required")?,
+            caches: self.caches.ok_or("caches are required")?,
+            concurrency_limiter: self.concurrency_limiter.ok_or("concurrency_limiter is required")?,
+            ongoing_requests: self.ongoing_requests.ok_or("ongoing_requests are required")?,
+            metrics: self.metrics.ok_or("metrics are required")?,
+            default_cors_config: self.default_cors_config.ok_or("default_cors_config is required")?,
+            load_balancer: self.load_balancer.ok_or("load_balancer is required")?,
+            bot_detector: self.bot_detector.ok_or("bot_detector is required")?,
+            rate_limiters: self.rate_limiters.ok_or("rate_limiters are required")?,
+        })
     }
 }
 
@@ -269,18 +269,18 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     }
 
     let proxy_state = Arc::new(ProxyStateBuilder::new()
-    .with_target_map(&config.targets)
-    .with_circuit_breakers(DashMap::new())
-    .with_caches(caches)
-    .with_concurrency_limiter(concurrency_limiter.clone())
-    .with_ongoing_requests(ongoing_requests.clone())
-    .with_metrics(metrics.clone())
-    .with_default_cors_config(config.default_cors_config.clone())
-    .with_load_balancer(load_balancer)
-    .with_bot_detector(bot_detector)
-    .with_rate_limiters(rate_limiters)
-    .build());
-
+        .with_target_map(&config.targets)
+        .with_circuit_breakers(DashMap::new())
+        .with_caches(caches)
+        .with_concurrency_limiter(concurrency_limiter.clone())
+        .with_ongoing_requests(ongoing_requests.clone())
+        .with_metrics(metrics.clone())
+        .with_default_cors_config(config.default_cors_config.clone())
+        .with_load_balancer(load_balancer)
+        .with_bot_detector(bot_detector)
+        .with_rate_limiters(rate_limiters)
+        .build()?
+    );
 
     let addr = format!("{}:{}", config.server.host, config.server.port)
         .parse::<SocketAddr>()?;
@@ -942,7 +942,10 @@ fn main() {
         "INFO" => tracing::Level::INFO,
         "WARN" => tracing::Level::WARN,
         "ERROR" => tracing::Level::ERROR,
-        _ => tracing::Level::INFO,
+        _ => {
+            eprintln!("Invalid log level: {}", config.server.max_logging_level);
+            std::process::exit(1);
+        }
     };
 
     let (non_blocking_writer, _guard) = non_blocking(std::io::stdout());
