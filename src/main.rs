@@ -50,7 +50,7 @@ use tokio::time::{sleep, Duration, timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber;
 use std::convert::Infallible;
-use tokio::{signal, spawn};
+use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
 use tracing_appender::non_blocking;
@@ -60,7 +60,7 @@ use dashmap::DashMap;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
-use tokio::task::{spawn_blocking, JoinHandle};
+use tokio::task::spawn_blocking;
 use std::sync::Mutex;
 
 const POOL_IDLE_TIMEOUT: u64 = 30;
@@ -325,43 +325,33 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                     let security_headers_config = Arc::clone(&security_headers_config);
 
                     async move {
-                        let handle: JoinHandle<Result<Response<Body>, hyper::Error>> = spawn(async move {
-                            proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
-                            proxy_state.metrics.http_requests_total.inc();
-                            proxy_state.metrics.ongoing_requests.inc();
-                            proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
+                        proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
+                        proxy_state.metrics.http_requests_total.inc();
+                        proxy_state.metrics.ongoing_requests.inc();
+                        proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
 
-                            if let Some(bot_detector) = &proxy_state.bot_detector {
-                                if is_bot_request(&req, bot_detector) {
-                                    warn!("Bot detected and request rejected: {:?}", req);
-                                    proxy_state.metrics.failed_requests.inc();
-                                    proxy_state.metrics.error_counts.with_label_values(&["bot_detected"]).inc();
-                                    return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
-                                }
-                            }
-
-                            let response = proxy_request(
-                                req,
-                                client_ip,
-                                Arc::clone(&proxy_state),
-                                retry_config,
-                                default_circuit_breaker_config,
-                                default_timeout_seconds,
-                                security_headers_config,
-                                client,
-                            ).await;
-                            proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
-                            proxy_state.metrics.ongoing_requests.dec();
-                            response
-                        });
-
-                        match handle.await {
-                            Ok(result) => result,
-                            Err(e) => {
-                                error!("Task failed: {}", e);
-                                Ok(Response::from(ProxyError::InternalServerError(e.to_string())))
+                        if let Some(bot_detector) = &proxy_state.bot_detector {
+                            if is_bot_request(&req, bot_detector) {
+                                warn!("Bot detected and request rejected: {:?}", req);
+                                proxy_state.metrics.failed_requests.inc();
+                                proxy_state.metrics.error_counts.with_label_values(&["bot_detected"]).inc();
+                                return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
                             }
                         }
+
+                        let response = proxy_request(
+                            req,
+                            client_ip,
+                            Arc::clone(&proxy_state),
+                            retry_config,
+                            default_circuit_breaker_config,
+                            default_timeout_seconds,
+                            security_headers_config,
+                            client,
+                        ).await;
+                        proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
+                        proxy_state.metrics.ongoing_requests.dec();
+                        response
                     }
                 }))
             }
