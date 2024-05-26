@@ -47,8 +47,9 @@ impl RateLimiter {
 
     fn start_refill_task(self: &Arc<Self>) {
         let limiter = self.clone();
+        let start = Instant::now() + limiter.config.period;
         tokio::spawn(async move {
-            let mut interval = time::interval(limiter.config.period);
+            let mut interval = time::interval_at(start, limiter.config.period);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
