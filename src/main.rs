@@ -14,12 +14,14 @@ mod security_headers;
 mod load_balancer;
 mod bot_detector;
 mod config;
+mod rate_limiter;
 
 use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
 use crate::config::{read_config, AuthenticationType};
 use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
+use crate::rate_limiter::RateLimiterConfig;
 use crate::security_headers::apply_security_headers;
 use crate::validate::validate_request;
 use crate::bot_detector::{is_bot_request, BotDetectorConfig};
@@ -28,6 +30,7 @@ use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use config::{AuthenticationConfig, LoggingConfig, ProxyConfig, Target};
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
+use rate_limiter::RateLimiterManager;
 use retry::{RetryConfig, RetryStrategy};
 use security_headers::SecurityHeadersConfig;
 use tokio::fs::File;
@@ -88,6 +91,7 @@ struct ProxyState {
     default_cors_config: Option<CorsConfig>,
     load_balancer: Option<Arc<RwLock<LoadBalancer>>>,
     bot_detector: Option<Arc<BotDetectorConfig>>, 
+    rate_limiters: Arc<RateLimiterManager>,
 }
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -141,6 +145,21 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     let bot_detector = config.bot_detector.as_ref().map(|bot_config| Arc::new(bot_config.clone()));
 
+    let rate_limiters = Arc::new(RateLimiterManager::new());
+
+    for target in &config.targets {
+        if let Some(rate_limiter_config) = &target.rate_limiter_config {
+            rate_limiters.add_limiter(
+                target.path.clone(),
+                RateLimiterConfig {
+                    capacity: rate_limiter_config.capacity,
+                    max_rate: rate_limiter_config.max_rate,
+                    period: Duration::from_secs(rate_limiter_config.every.unwrap_or(1)),
+                },
+            ).await;
+        }
+    }
+
     let proxy_state = Arc::new(ProxyState {
         target_map: initial_target_map,
         circuit_breakers: DashMap::new(),
@@ -151,6 +170,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         default_cors_config,
         load_balancer,
         bot_detector, 
+        rate_limiters,
     });
 
     let make_svc = {
@@ -354,6 +374,17 @@ where
             return Ok(ProxyError::NotFound("No target found for the given path".to_string()).into());
         }
     };
+
+    info!(request_id = %request_id, "Checking rate limiter for path: {}", path);
+    if let Some(rate_limiter) = proxy_state.rate_limiters.get_limiter(&path).await {
+        info!(request_id = %request_id, "Rate limiter found for path: {}", path);
+        if !rate_limiter.acquire().await {
+            error!(request_id = %request_id, "Rate limit exceeded for path: {}", path);
+            return Ok(ProxyError::TooManyRequests("Rate limit exceeded".to_string()).into());
+        }
+    } else {
+        info!(request_id = %request_id, "No rate limiter configured for path: {}", path);
+    }
 
     if let Some(auth_config) = auth_config {
         match auth_config.auth_type {
@@ -617,8 +648,8 @@ where
 }
 
 
-fn find_target(
-    proxy_state: &Arc<ProxyState>,
+fn find_target<'a>(
+    proxy_state: &'a ProxyState,
     path: &str,
     req: &Request<Body>,
     default_retry_config: &Arc<RetryConfig>,
@@ -661,7 +692,7 @@ fn find_target(
                         values.get(header_value.to_str().unwrap_or_default())
                     }) {
                         target = Some((
-                            urls.clone(),
+                            vec![target_url.clone()],
                             p.len(),
                             auth_config.clone(),
                             retries.as_ref().unwrap_or(default_retry_config).to_strategy(),
@@ -696,6 +727,7 @@ fn find_target(
     }
     target
 }
+
 
 async fn rebuild_request(
     original_req: &mut Request<Body>,

@@ -6,7 +6,7 @@ pub enum ProxyError {
     #[error("Service Unavailable: Circuit Breaker is Open")]
     CircuitBreakerOpen,
     #[error("Too Many Requests: Rate limit exceeded")]
-    RateLimitExceeded,
+    TooManyRequests(String),
     #[error("Gateway Timeout")]
     Timeout,
     #[error("Internal Server Error: {0}")]
@@ -30,9 +30,9 @@ impl From<ProxyError> for Response<Body> {
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(Body::from(error.to_string()))
                 .unwrap(),
-            ProxyError::RateLimitExceeded => Response::builder()
+            ProxyError::TooManyRequests(msg) => Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
-                .body(Body::from(error.to_string()))
+                .body(Body::from(msg))
                 .unwrap(),
             ProxyError::Timeout => Response::builder()
                 .status(StatusCode::GATEWAY_TIMEOUT)

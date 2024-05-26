@@ -70,6 +70,7 @@ pub struct Target {
     pub cache_config: Option<CacheConfig>,
     pub logging_config: Option<LoggingConfig>,
     pub cors_config: Option<CorsConfig>,
+    pub rate_limiter_config: Option<RateLimiterConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -90,6 +91,13 @@ pub enum AuthenticationType {
 pub struct LoggingConfig {
     pub log_requests: bool,
     pub log_responses: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RateLimiterConfig {
+    pub capacity: usize,
+    pub max_rate: usize,
+    pub every: Option<u64>,
 }
 
 pub fn read_config() -> Result<ProxyConfig, ConfigError> {
