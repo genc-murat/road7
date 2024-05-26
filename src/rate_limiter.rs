@@ -17,7 +17,7 @@ pub struct RateLimiter {
     config: RateLimiterConfig,
     tokens: RwLock<usize>,
     last_refill: RwLock<Instant>,
-    last_acquire: RwLock<Instant>, // Son başarılı alma zamanını izlemek için
+    last_acquire: RwLock<Instant>,
     shutdown: tokio::sync::Notify,
 }
 
@@ -28,8 +28,8 @@ pub struct RateLimiterStatus {
     tokens: usize,
     max_rate: usize,
     period: Duration,
-    last_refill: String,  // Daha iyi okunabilirlik için String'e dönüştürün
-    last_acquire: String, // Daha iyi okunabilirlik için String'e dönüştürün
+    last_refill: String,
+    last_acquire: String,
 }
 
 impl RateLimiter {
@@ -138,9 +138,7 @@ impl RateLimiterManager {
 
     pub async fn add_limiter(&self, target: String, config: RateLimiterConfig) {
         let mut limiters = self.limiters.write().await;
-        // Eşleşen bir hedef varsa mevcut limitleyiciyi güncelleyin
         if let Some(existing_limiter) = limiters.get_mut(&target) {
-            // Mevcut limitleyiciyi yeni yapılandırmayla güncelleyin
             *existing_limiter = RateLimiter::new(config);
         } else {
             limiters.insert(target, RateLimiter::new(config));
