@@ -98,6 +98,7 @@ pub struct RateLimiterConfig {
     pub capacity: usize,
     pub max_rate: usize,
     pub every: Option<u64>,
+    pub burst_capacity: usize,
 }
 
 pub fn read_config() -> Result<ProxyConfig, ConfigError> {

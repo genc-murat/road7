@@ -59,7 +59,7 @@ urls = ["https://localhost:7277","http://localhost:5001"]
 timeout_seconds = 3
 # This target uses the default retry and circuit breaker configuration
 logging_config = { log_requests = true, log_responses = true }
-rate_limiter_config = { capacity = 10, max_rate = 10, every = 100 }
+rate_limiter_config = { capacity = 10, burst_capacity = 5, max_rate = 10, every = 100 }
 
 
 [[targets]]

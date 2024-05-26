@@ -153,6 +153,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                 target.path.clone(),
                 RateLimiterConfig {
                     capacity: rate_limiter_config.capacity,
+                    burst_capacity: rate_limiter_config.burst_capacity,
                     max_rate: rate_limiter_config.max_rate,
                     period: Duration::from_secs(rate_limiter_config.every.unwrap_or(1)),
                 },
@@ -250,7 +251,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
-
 fn build_target_map(
     targets: &[Target],
 ) -> DashMap<
@@ -292,7 +292,6 @@ fn build_target_map(
     }
     map
 }
-
 async fn proxy_request<C>(
     mut original_req: Request<Body>,
     client_ip: SocketAddr,

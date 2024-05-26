@@ -7,6 +7,7 @@ use tracing::{info, error};
 #[derive(Clone)]
 pub struct RateLimiterConfig {
     pub capacity: usize,
+    pub burst_capacity: usize,
     pub max_rate: usize,
     pub period: Duration,
 }
@@ -20,7 +21,7 @@ pub struct RateLimiter {
 impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Arc<Self> {
         Arc::new(Self {
-            tokens: RwLock::new(config.capacity),
+            tokens: RwLock::new(config.capacity + config.burst_capacity),
             last_refill: RwLock::new(Instant::now()),
             config,
         })
@@ -34,11 +35,11 @@ impl RateLimiter {
         let leak_rate = self.config.max_rate as f64 / self.config.period.as_secs_f64();
         let leaked_tokens = (elapsed.as_secs_f64() * leak_rate).min(*tokens as f64) as usize;
 
-        *tokens = tokens.saturating_sub(leaked_tokens).min(self.config.capacity);
+        *tokens = tokens.saturating_sub(leaked_tokens).min(self.config.capacity + self.config.burst_capacity);
         if elapsed >= self.config.period {
-            *tokens = self.config.capacity;
+            *tokens = self.config.capacity + self.config.burst_capacity;
             *last_refill = Instant::now();
-            info!("Refilled tokens to capacity: {}", self.config.capacity);
+            info!("Refilled tokens to capacity: {}", self.config.capacity + self.config.burst_capacity);
         } else {
             *last_refill += Duration::from_secs_f64(leaked_tokens as f64 / leak_rate);
             info!("Leaked tokens: {}, remaining tokens: {}", leaked_tokens, *tokens);
