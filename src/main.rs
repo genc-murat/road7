@@ -608,7 +608,7 @@ where
 
     {
         let mut circuit_breaker = circuit_breaker_lock.write().await;
-        if !circuit_breaker.can_attempt() {
+        if !circuit_breaker.can_attempt().await {
             error!(request_id = %request_id, "Circuit breaker is open for: {}", target_urls[0]);
             return Ok(ProxyError::CircuitBreakerOpen.into());
         }
@@ -666,10 +666,10 @@ where
                         apply_response_transforms(&mut resp, transforms);
                     }
                     let mut circuit_breaker = circuit_breaker_lock.write().await;
-                    if circuit_breaker.state == CircuitState::HalfOpen {
-                        circuit_breaker.transition_to_closed();
+                    if circuit_breaker.get_state() == CircuitState::HalfOpen {
+                        circuit_breaker.transition_to_closed().await;
                     } else {
-                        circuit_breaker.record_success();
+                        circuit_breaker.record_success().await;
                     }
 
                     if resp.status() == StatusCode::NOT_MODIFIED {
@@ -749,7 +749,7 @@ where
                 } else {
                     error!(request_id = %request_id, "Error after retries: {}", err);
                     let mut circuit_breaker = circuit_breaker_lock.write().await;
-                    circuit_breaker.record_failure();
+                    circuit_breaker.record_failure().await;
                     return Ok(ProxyError::InternalServerError(err.to_string()).into());
                 }
             }
@@ -757,7 +757,7 @@ where
                 if Instant::now().duration_since(start_time) >= Duration::from_secs(target_timeout) {
                     warn!(request_id = %request_id, "Global timeout exceeded, no more retries");
                     let mut circuit_breaker = circuit_breaker_lock.write().await;
-                    circuit_breaker.record_failure();
+                    circuit_breaker.record_failure().await;
                     return Ok(ProxyError::Timeout.into());
                 } else {
                     warn!(request_id = %request_id, "Timeout after {} seconds, retrying...", target_timeout);
@@ -768,7 +768,7 @@ where
                     } else {
                         error!(request_id = %request_id, "Timeout after retries");
                         let mut circuit_breaker = circuit_breaker_lock.write().await;
-                        circuit_breaker.record_failure();
+                        circuit_breaker.record_failure().await;
                         return Ok(ProxyError::Timeout.into());
                     }
                 }
@@ -778,9 +778,9 @@ where
 
     error!(request_id = %request_id, "Maximum retries exceeded");
     let mut circuit_breaker = circuit_breaker_lock.write().await;
-    circuit_breaker.record_failure();
-    if circuit_breaker.state == CircuitState::HalfOpen {
-        circuit_breaker.transition_to_open();
+    circuit_breaker.record_failure().await;
+    if circuit_breaker.get_state() == CircuitState::HalfOpen {
+        circuit_breaker.transition_to_open().await;
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }

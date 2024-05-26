@@ -1,6 +1,9 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, error};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
@@ -26,9 +29,9 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CircuitBreaker {
-   pub state: CircuitState,
+    state: CircuitState,
     failure_count: usize,
     last_attempt: Instant,
     open_until: Instant,
@@ -53,29 +56,29 @@ impl CircuitBreaker {
         }
     }
 
-    pub fn record_success(&mut self) {
+    pub async fn record_success(&mut self) {
         debug!("Circuit breaker: Success recorded");
         self.failure_count = 0;
         self.state = CircuitState::Closed;
         self.half_open_attempts = 0;
     }
 
-    pub fn record_failure(&mut self) {
+    pub async fn record_failure(&mut self) {
         debug!("Circuit breaker: Failure recorded");
         self.failure_count += 1;
         self.last_attempt = Instant::now();
         if self.failure_count >= self.max_failures {
-            self.transition_to_open();
+            self.transition_to_open().await;
         }
     }
 
-    pub fn can_attempt(&mut self) -> bool {
+    pub async fn can_attempt(&mut self) -> bool {
         let now = Instant::now();
         match self.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 if now >= self.open_until {
-                    self.transition_to_half_open();
+                    self.transition_to_half_open().await;
                     true
                 } else {
                     false
@@ -92,23 +95,27 @@ impl CircuitBreaker {
         }
     }
 
-   pub fn transition_to_closed(&mut self) {
+    pub async fn transition_to_closed(&mut self) {
         debug!("Circuit breaker transitioning to Closed");
         self.state = CircuitState::Closed;
         self.failure_count = 0;
         self.half_open_attempts = 0;
     }
 
-    pub fn transition_to_open(&mut self) {
+    pub async fn transition_to_open(&mut self) {
         debug!("Circuit breaker transitioning to Open");
         self.state = CircuitState::Open;
         self.open_until = Instant::now() + self.reset_timeout;
         self.half_open_attempts = 0;
     }
 
-    fn transition_to_half_open(&mut self) {
+    pub async fn transition_to_half_open(&mut self) {
         debug!("Circuit breaker transitioning to Half-Open");
         self.state = CircuitState::HalfOpen;
         self.half_open_attempts = 0;
+    }
+
+    pub fn get_state(&self) -> CircuitState {
+        self.state
     }
 }
