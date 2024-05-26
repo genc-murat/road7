@@ -94,6 +94,13 @@ struct ProxyState {
     rate_limiters: Arc<RateLimiterManager>,
 }
 
+impl ProxyState {
+    async fn shutdown(&self) {
+        self.rate_limiters.shutdown().await;
+        info!("Proxy state has been shutdown gracefully.");
+    }
+}
+
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(metrics::Metrics::new());
 
@@ -263,6 +270,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         while proxy_state_for_shutdown.ongoing_requests.load(Ordering::SeqCst) > 0 {
             sleep(Duration::from_millis(100)).await;
         }
+        proxy_state_for_shutdown.shutdown().await;
         info!("All pending requests completed. Shutting down...");
     });
 

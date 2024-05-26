@@ -18,6 +18,7 @@ pub struct RateLimiter {
     tokens: RwLock<usize>,
     last_refill: RwLock<Instant>,
     last_acquire: RwLock<Instant>, // Son başarılı alma zamanını izlemek için
+    shutdown: tokio::sync::Notify,
 }
 
 #[derive(Serialize)]
@@ -38,6 +39,7 @@ impl RateLimiter {
             last_refill: RwLock::new(Instant::now()),
             last_acquire: RwLock::new(Instant::now()),
             config,
+            shutdown: tokio::sync::Notify::new(),
         });
         limiter.start_refill_task();
         limiter
@@ -48,11 +50,18 @@ impl RateLimiter {
         tokio::spawn(async move {
             let mut interval = time::interval(limiter.config.period);
             loop {
-                interval.tick().await;
-                let mut tokens = limiter.tokens.write().await;
-                *tokens = limiter.config.capacity + limiter.config.burst_capacity;
-                *limiter.last_refill.write().await = Instant::now();
-                info!("Tokens refilled to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let mut tokens = limiter.tokens.write().await;
+                        *tokens = limiter.config.capacity + limiter.config.burst_capacity;
+                        *limiter.last_refill.write().await = Instant::now();
+                        info!("Tokens refilled to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
+                    },
+                    _ = limiter.shutdown.notified() => {
+                        info!("Rate limiter shutdown.");
+                        break;
+                    }
+                }
             }
         });
     }
@@ -83,6 +92,10 @@ impl RateLimiter {
         } else {
             Err(RateLimitError::Exhausted)
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.shutdown.notify_waiters();
     }
 }
 
@@ -140,5 +153,12 @@ impl RateLimiterManager {
             statuses.insert(path.clone(), limiter.status().await);
         }
         statuses
+    }
+
+    pub async fn shutdown(&self) {
+        let limiters = self.limiters.read().await;
+        for limiter in limiters.values() {
+            limiter.shutdown().await;
+        }
     }
 }
