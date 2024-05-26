@@ -54,9 +54,9 @@ impl RateLimiter {
                 tokio::select! {
                     _ = interval.tick() => {
                         let mut tokens = limiter.tokens.write().await;
-                        *tokens = limiter.config.capacity + limiter.config.burst_capacity;
+                        *tokens = (*tokens + limiter.config.max_rate).min(limiter.config.capacity + limiter.config.burst_capacity);
                         *limiter.last_refill.write().await = Instant::now();
-                        info!("Tokens refilled to capacity: {}", limiter.config.capacity + limiter.config.burst_capacity);
+                        info!("Tokens refilled. Current tokens: {}", *tokens);
                     },
                     _ = limiter.shutdown.notified() => {
                         info!("Rate limiter shutdown.");
@@ -91,6 +91,7 @@ impl RateLimiter {
             info!("Token acquired, remaining tokens: {}", *tokens);
             Ok(())
         } else {
+            error!("Rate limit exceeded.");
             Err(RateLimitError::Exhausted)
         }
     }
@@ -120,12 +121,10 @@ impl RateLimiterManager {
         let limiters = self.limiters.read().await;
         info!("Checking rate limiter for target: {}", target);
 
-        // Tam eşleşmeyi deneyin
         if let Some(limiter) = limiters.get(target) {
             return Some(limiter.clone());
         }
 
-        // Önek eşleşmesini deneyin
         for (path, limiter) in limiters.iter() {
             if target.starts_with(path) {
                 info!("Rate limiter found for path prefix: {}", path);
