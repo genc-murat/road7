@@ -12,6 +12,10 @@ validate_requests = true
 [runtime]
 worker_threads = 2
 
+[default_rate_limiter_config]
+refill_rate = 2
+burst_capacity = 5
+
 # Default retry configuration for all targets (if not overridden per target)
 [retries]
 strategy = "FixedInterval"
@@ -27,7 +31,7 @@ half_open_attempts = 2
 # List of target configurations
 [[targets]]
 path = "/api/service1"
-url = "http://localhost:5001"
+urls = ["http://localhost:5001"]
 # Optional retry configuration for this specific target
 retries = { strategy = "FixedInterval", max_attempts = 3, base_delay_seconds = 1 }
 routing_header = "X-Api-Version"
@@ -35,7 +39,7 @@ routing_values = { "v1" = "http://localhost:5001/v1", "v2" = "http://localhost:5
 
 # Optional circuit breaker configuration for this specific target
 circuit_breaker_config = { max_failures = 2, reset_timeout_seconds = 5, half_open_attempts = 1 }
-authentication = {jwt_secret = "your_secret_key",type = "JWT" }
+
 # Optional request transformations for this target
 request_transforms = [
     { type = "Header", name = "X-Proxy-Inject", value = "Service1", operation = "Set" }
@@ -46,23 +50,25 @@ response_transforms = [
     { type = "Header", name = "X-Proxy-Modified", value = "true", operation = "Set" }
 ]
 
+[load_balancer]
+algorithm = "RoundRobin"
+
 [[targets]]
 path = "/api/service2"
-url = "https://localhost:7277"
+urls = ["https://localhost:7277","http://localhost:5001"]
 timeout_seconds = 3
-cache_config = { ttl_seconds = 60, max_size = 50, serialize= true }
+# This target uses the default retry and circuit breaker configuration
 logging_config = { log_requests = true, log_responses = true }
 rate_limiter_config = { capacity = 10, max_rate = 10, every = 100 }
 
 
 [[targets]]
 path = "/api/service3"
-url = "http://localhost:9003"
+urls = ["http://localhost:9003"]
 # Specific retry configuration for this target
 retries = { strategy = "FixedInterval", max_attempts = 4, base_delay_seconds = 1 }
 # Specific circuit breaker configuration for this target
 circuit_breaker_config = { max_failures = 1, reset_timeout_seconds = 10, half_open_attempts = 1 }
-
 
 [security_headers_config]
 strict_transport_security = "max-age=31536000; includeSubDomains"
@@ -73,11 +79,3 @@ x_xss_protection = "1; mode=block"
 referrer_policy = "no-referrer"
 permissions_policy = "geolocation=(), microphone=(), camera=()"
 
-[bot_detector]
-allow = ["MyAndroidClient/1.0", "Pingdom.com_bot_version_1.1"]
-deny = ["a", "b"]
-patterns = [
-    "(Pingdom.com_bot_version_).*",
-    "(facebookexternalhit)/.*"
-]
-empty_user_agent_is_bot = true
