@@ -60,7 +60,7 @@ impl RateLimiter {
                         let mut tokens = limiter.tokens.write().await;
                         *tokens = (*tokens + 1).min(limiter.config.capacity + limiter.config.burst_capacity);
                         *limiter.last_refill.write().await = Instant::now();
-                        info!("Tokens refilled. Current tokens: {}", *tokens);
+                        //info!("Tokens refilled. Current tokens: {}", *tokens);
                     },
                     _ = limiter.shutdown.notified() => {
                         info!("Rate limiter shutdown initiated.");
