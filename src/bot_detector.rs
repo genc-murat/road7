@@ -52,3 +52,110 @@ pub async fn is_bot_request(req: &Request<hyper::Body>, config: &BotDetectorConf
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::header::{HeaderValue, USER_AGENT};
+    use hyper::Body;
+    use hyper::Request;
+
+    #[tokio::test]
+    async fn test_allow_list() {
+        let config = BotDetectorConfig {
+            allow: vec!["Mozilla".to_string()],
+            deny: vec![],
+            patterns: vec![],
+            empty_user_agent_is_bot: false,
+        };
+
+        let req = Request::builder()
+            .header(USER_AGENT, "Mozilla/5.0")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, false);
+    }
+
+    #[tokio::test]
+    async fn test_deny_list() {
+        let config = BotDetectorConfig {
+            allow: vec![],
+            deny: vec!["BadBot".to_string()],
+            patterns: vec![],
+            empty_user_agent_is_bot: false,
+        };
+
+        let req = Request::builder()
+            .header(USER_AGENT, "BadBot/1.0")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, true);
+    }
+
+    #[tokio::test]
+    async fn test_patterns_list() {
+        let config = BotDetectorConfig {
+            allow: vec![],
+            deny: vec![],
+            patterns: vec![r"Bot/.*".to_string()],
+            empty_user_agent_is_bot: false,
+        };
+
+        let req = Request::builder()
+            .header(USER_AGENT, "SomeBot/1.0")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, true);
+    }
+
+    #[tokio::test]
+    async fn test_empty_user_agent_is_bot() {
+        let config = BotDetectorConfig {
+            allow: vec![],
+            deny: vec![],
+            patterns: vec![],
+            empty_user_agent_is_bot: true,
+        };
+
+        let req = Request::builder()
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, true);
+    }
+
+    #[tokio::test]
+    async fn test_empty_user_agent_is_not_bot() {
+        let config = BotDetectorConfig {
+            allow: vec![],
+            deny: vec![],
+            patterns: vec![],
+            empty_user_agent_is_bot: false,
+        };
+
+        let req = Request::builder()
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, false);
+    }
+
+    #[tokio::test]
+    async fn test_no_user_agent_header() {
+        let config = BotDetectorConfig {
+            allow: vec!["Mozilla".to_string()],
+            deny: vec!["BadBot".to_string()],
+            patterns: vec![r"Bot/.*".to_string()],
+            empty_user_agent_is_bot: false,
+        };
+
+        let req = Request::builder()
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(is_bot_request(&req, &config).await, false);
+    }
+}
