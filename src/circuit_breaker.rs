@@ -1,9 +1,8 @@
-use std::sync::Arc;
+
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error};
+
+use tracing::debug;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {

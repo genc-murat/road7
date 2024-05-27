@@ -15,38 +15,36 @@ mod load_balancer;
 mod bot_detector;
 mod config;
 mod rate_limiter;
+mod state;
 
+use state::{ProxyState, ProxyStateBuilder, increment_counter_async, increment_counter_with_label_async, observe_histogram_async, set_gauge_async, serve_static_file, rate_limiter_status_handler};
 use crate::cache::{Cache, CacheConfig, create_cache_key, CacheEntry};
-use crate::config::{read_config, AuthenticationType};
-use crate::load_balancer::{LoadBalancer, LoadBalancerConfig, LoadBalancingAlgorithm};
+use crate::config::{read_config, AuthenticationType, AuthenticationConfig, LoggingConfig, ProxyConfig};
+use crate::load_balancer::LoadBalancer;
 use crate::auth::jwt::validate_jwt;
 use crate::auth::basic::validate_basic;
 use crate::rate_limiter::{RateLimitError, RateLimiterConfig};
 use crate::security_headers::apply_security_headers;
 use crate::validate::validate_request;
-use crate::bot_detector::{is_bot_request, BotDetectorConfig};
+use crate::bot_detector::is_bot_request;
+use crate::metrics::Metrics;
 use cache::CorsConfig;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
-use config::{AuthenticationConfig, LoggingConfig, ProxyConfig, Target};
+
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
-use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use rate_limiter::RateLimiterManager;
 use retry::{RetryConfig, RetryStrategy};
 use security_headers::SecurityHeadersConfig;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
 use transform::Transform;
 use hyper::{Body, Client, Request, Response, Server, StatusCode, Uri};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, HOST};
 use hyper::client::HttpConnector;
 use hyper_tls::HttpsConnector;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
-use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration, timeout};
 use tracing::{error, info, warn};
 use tracing_subscriber;
@@ -55,167 +53,19 @@ use tokio::signal;
 use std::time::Instant;
 use std::net::SocketAddr;
 use tracing_appender::non_blocking;
-
 use dashmap::DashMap;
-
 use uuid::Uuid;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
-use tokio::task::spawn_blocking;
-use std::sync::Mutex;
 
 const POOL_IDLE_TIMEOUT: u64 = 30;
 
-struct ProxyState {
-    target_map: DashMap<
-        String,
-        (
-            Vec<String>,
-            Option<AuthenticationConfig>,
-            Option<RetryConfig>,
-            Option<Vec<Transform>>,
-            Option<Vec<Transform>>,
-            Option<CircuitBreakerConfig>,
-            Option<String>,
-            Option<HashMap<String, String>>,
-            Option<CacheConfig>,
-            Option<u64>,
-            Option<LoggingConfig>,
-            Option<CorsConfig>,
-        ),
-    >,
-    circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>,
-    caches: DashMap<String, Cache>,
-    concurrency_limiter: Arc<Semaphore>,
-    ongoing_requests: Arc<AtomicUsize>,
-    metrics: Arc<metrics::Metrics>,
-    default_cors_config: Option<CorsConfig>,
-    load_balancer: Option<Arc<RwLock<LoadBalancer>>>,
-    bot_detector: Option<Arc<BotDetectorConfig>>, 
-    rate_limiters: Arc<RateLimiterManager>,
-}
-
-impl ProxyState {
-    async fn shutdown(&self) {
-        self.rate_limiters.shutdown().await;
-        info!("Proxy state has been shutdown gracefully.");
-    }
-}
-
-struct ProxyStateBuilder {
-    target_map: Option<DashMap<String, (
-        Vec<String>,
-        Option<AuthenticationConfig>,
-        Option<RetryConfig>,
-        Option<Vec<Transform>>,
-        Option<Vec<Transform>>,
-        Option<CircuitBreakerConfig>,
-        Option<String>,
-        Option<HashMap<String, String>>,
-        Option<CacheConfig>,
-        Option<u64>,
-        Option<LoggingConfig>,
-        Option<CorsConfig>,
-    )>>,
-    circuit_breakers: Option<DashMap<String, Arc<RwLock<CircuitBreaker>>>>,
-    caches: Option<DashMap<String, Cache>>,
-    concurrency_limiter: Option<Arc<Semaphore>>,
-    ongoing_requests: Option<Arc<AtomicUsize>>,
-    metrics: Option<Arc<metrics::Metrics>>,
-    default_cors_config: Option<Option<CorsConfig>>,
-    load_balancer: Option<Option<Arc<RwLock<LoadBalancer>>>>,
-    bot_detector: Option<Option<Arc<BotDetectorConfig>>>,
-    rate_limiters: Option<Arc<RateLimiterManager>>,
-}
-
-impl ProxyStateBuilder {
-    fn new() -> Self {
-        Self {
-            target_map: None,
-            circuit_breakers: None,
-            caches: None,
-            concurrency_limiter: None,
-            ongoing_requests: None,
-            metrics: None,
-            default_cors_config: None,
-            load_balancer: None,
-            bot_detector: None,
-            rate_limiters: None,
-        }
-    }
-
-    fn with_target_map(mut self, targets: &[Target]) -> Self {
-        self.target_map = Some(build_target_map(targets));
-        self
-    }
-
-    fn with_circuit_breakers(mut self, circuit_breakers: DashMap<String, Arc<RwLock<CircuitBreaker>>>) -> Self {
-        self.circuit_breakers = Some(circuit_breakers);
-        self
-    }
-
-    fn with_caches(mut self, caches: DashMap<String, Cache>) -> Self {
-        self.caches = Some(caches);
-        self
-    }
-
-    fn with_concurrency_limiter(mut self, concurrency_limiter: Arc<Semaphore>) -> Self {
-        self.concurrency_limiter = Some(concurrency_limiter);
-        self
-    }
-
-    fn with_ongoing_requests(mut self, ongoing_requests: Arc<AtomicUsize>) -> Self {
-        self.ongoing_requests = Some(ongoing_requests);
-        self
-    }
-
-    fn with_metrics(mut self, metrics: Arc<metrics::Metrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
-    }
-
-    fn with_default_cors_config(mut self, default_cors_config: Option<CorsConfig>) -> Self {
-        self.default_cors_config = Some(default_cors_config);
-        self
-    }
-
-    fn with_load_balancer(mut self, load_balancer: Option<Arc<RwLock<LoadBalancer>>>) -> Self {
-        self.load_balancer = Some(load_balancer);
-        self
-    }
-
-    fn with_bot_detector(mut self, bot_detector: Option<Arc<BotDetectorConfig>>) -> Self {
-        self.bot_detector = Some(bot_detector);
-        self
-    }
-
-    fn with_rate_limiters(mut self, rate_limiters: Arc<RateLimiterManager>) -> Self {
-        self.rate_limiters = Some(rate_limiters);
-        self
-    }
-
-    fn build(self) -> Result<ProxyState, &'static str> {
-        Ok(ProxyState {
-            target_map: self.target_map.ok_or("target_map is required")?,
-            circuit_breakers: self.circuit_breakers.ok_or("circuit_breakers are required")?,
-            caches: self.caches.ok_or("caches are required")?,
-            concurrency_limiter: self.concurrency_limiter.ok_or("concurrency_limiter is required")?,
-            ongoing_requests: self.ongoing_requests.ok_or("ongoing_requests are required")?,
-            metrics: self.metrics.ok_or("metrics are required")?,
-            default_cors_config: self.default_cors_config.ok_or("default_cors_config is required")?,
-            load_balancer: self.load_balancer.ok_or("load_balancer is required")?,
-            bot_detector: self.bot_detector.ok_or("bot_detector is required")?,
-            rate_limiters: self.rate_limiters.ok_or("rate_limiters are required")?,
-        })
-    }
-}
-
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let metrics = Arc::new(metrics::Metrics::new());
+    let metrics = Arc::new(Metrics::new());
     let concurrency_limiter = Arc::new(Semaphore::new(config.server.pool_size));
     let ongoing_requests = Arc::new(AtomicUsize::new(0));
 
-    let initial_target_map = build_target_map(&config.targets);
+    let initial_target_map = state::build_target_map(&config.targets);
 
     let caches = initial_target_map.iter()
         .filter_map(|entry| {
@@ -376,48 +226,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
     });
 
     graceful.await.map_err(Into::into)
-}
-
-fn build_target_map(
-    targets: &[Target],
-) -> DashMap<
-    String,
-    (
-        Vec<String>,
-        Option<AuthenticationConfig>,
-        Option<RetryConfig>,
-        Option<Vec<Transform>>,
-        Option<Vec<Transform>>,
-        Option<CircuitBreakerConfig>,
-        Option<String>,
-        Option<HashMap<String, String>>,
-        Option<CacheConfig>,
-        Option<u64>,
-        Option<LoggingConfig>,
-        Option<CorsConfig>,
-    ),
-> {
-    let map = DashMap::new();
-    for target in targets {
-        map.insert(
-            target.path.clone(),
-            (
-                target.urls.clone(),
-                target.authentication.clone(),
-                target.retries.clone(),
-                target.request_transforms.clone(),
-                target.response_transforms.clone(),
-                target.circuit_breaker_config.clone(),
-                target.routing_header.clone(),
-                target.routing_values.clone(),
-                target.cache_config.clone(),
-                target.timeout_seconds,
-                target.logging_config.clone(),
-                target.cors_config.clone(),
-            ),
-        );
-    }
-    map
 }
 
 async fn proxy_request<C>(
@@ -800,31 +608,6 @@ where
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
 }
 
-
-async fn increment_counter_async(counter: IntCounter) {
-    tokio::spawn(async move {
-        counter.inc();
-    }).await.unwrap();
-}
-
-async fn increment_counter_with_label_async(counter_vec: IntCounterVec, label: String) {
-    tokio::spawn(async move {
-        counter_vec.with_label_values(&[&label]).inc();
-    }).await.unwrap();
-}
-
-async fn observe_histogram_async(histogram: Histogram, value: f64) {
-    tokio::spawn(async move {
-        histogram.observe(value);
-    }).await.unwrap();
-}
-
-async fn set_gauge_async(gauge: IntGauge, value: i64) {
-    tokio::spawn(async move {
-        gauge.set(value);
-    }).await.unwrap();
-}
-
 fn find_target<'a>(
     proxy_state: &'a ProxyState,
     path: &str,
@@ -1011,33 +794,4 @@ fn main() {
             error!("Error running proxy: {}", e);
         }
     });
-}
-
-async fn serve_static_file(path: &str) -> Result<Response<Body>, hyper::Error> {
-    match File::open(path).await {
-        Ok(mut file) => {
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).await.unwrap();
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(contents))
-                .unwrap())
-        }
-        Err(_) => Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("File not found"))
-            .unwrap()),
-    }
-}
-
-async fn rate_limiter_status_handler(
-    rate_limiters: Arc<RateLimiterManager>,
-) -> Result<Response<Body>, hyper::Error> {
-    let statuses = rate_limiters.get_all_statuses().await;
-    let body = serde_json::to_string(&statuses).unwrap();
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body))
-        .unwrap())
 }

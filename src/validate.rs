@@ -2,7 +2,6 @@ use hyper::{Body, Request};
 use hyper::body::to_bytes;
 use regex::Regex;
 use ammonia::clean;
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
 
 static URI_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$").unwrap());

@@ -56,7 +56,7 @@ pub async fn is_bot_request(req: &Request<hyper::Body>, config: &BotDetectorConf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::{HeaderValue, USER_AGENT};
+    use hyper::header::USER_AGENT;
     use hyper::Body;
     use hyper::Request;
 

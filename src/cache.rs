@@ -5,13 +5,10 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 use hyper::{Body, Response, StatusCode, Request};
-use hyper::header::{HeaderMap, HeaderName, HeaderValue, VARY};
+use hyper::header::{HeaderMap, HeaderValue, VARY};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
-use uuid::Uuid;
-use http::header::{ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CorsConfig {

@@ -138,9 +138,7 @@ impl LoadBalancer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_round_robin() {
