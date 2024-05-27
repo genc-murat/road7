@@ -30,6 +30,7 @@ use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 use config::{AuthenticationConfig, LoggingConfig, ProxyConfig, Target};
 use error::ProxyError;
 use hyper::server::conn::AddrStream;
+use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use rate_limiter::RateLimiterManager;
 use retry::{RetryConfig, RetryStrategy};
 use security_headers::SecurityHeadersConfig;
@@ -331,13 +332,14 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                         proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
 
                         if let Some(bot_detector) = &proxy_state.bot_detector {
-                            if is_bot_request(&req, bot_detector) {
+                            if is_bot_request(&req, bot_detector).await {
                                 warn!("Bot detected and request rejected: {:?}", req);
-                                proxy_state.metrics.failed_requests.inc();
-                                proxy_state.metrics.error_counts.with_label_values(&["bot_detected"]).inc();
+                                increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+                                increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "bot_detected".to_string()).await;
                                 return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
                             }
                         }
+                        
 
                         let response = proxy_request(
                             req,
@@ -436,13 +438,13 @@ where
 
     if let Err(validation_error) = validate_request(&mut original_req).await {
         error!(request_id = %request_id, "Request validation failed: {}", validation_error);
-        proxy_state.metrics.failed_requests.inc();
-        proxy_state.metrics.error_counts.with_label_values(&["validation_error"]).inc();
+        increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+        increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "validation_error".to_string()).await;
         return Ok(ProxyError::BadRequest(validation_error).into());
     }
 
     let request_size = hyper::body::to_bytes(original_req.body_mut()).await.unwrap().len();
-    proxy_state.metrics.request_size_bytes.observe(request_size as f64);
+    observe_histogram_async(proxy_state.metrics.request_size_bytes.clone(), request_size as f64).await;
 
     let _permit = proxy_state.concurrency_limiter.acquire().await;
 
@@ -473,8 +475,8 @@ where
 
     info!(request_id = %request_id, "Handling request for path: {}", path);
 
-    proxy_state.metrics.http_requests_total.inc();
-    proxy_state.metrics.ongoing_requests.inc();
+    increment_counter_async(proxy_state.metrics.http_requests_total.clone()).await;
+    set_gauge_async(proxy_state.metrics.ongoing_requests.clone(), proxy_state.ongoing_requests.load(Ordering::SeqCst) as i64 + 1).await;
 
     let start_time = Instant::now();
 
@@ -499,8 +501,8 @@ where
         Some(t) => t,
         None => {
             error!(request_id = %request_id, "No target found for path: {}", path);
-            proxy_state.metrics.failed_requests.inc();
-            proxy_state.metrics.error_counts.with_label_values(&["no_target"]).inc();
+            increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+            increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "no_target".to_string()).await;
             return Ok(ProxyError::NotFound("No target found for the given path".to_string()).into());
         }
     };
@@ -530,8 +532,8 @@ where
                 if let Some(secret) = &auth_config.jwt_secret {
                     if let Err(err) = validate_jwt(&original_req, secret).await {
                         error!(request_id = %request_id, "JWT validation failed: {}", err);
-                        proxy_state.metrics.failed_requests.inc();
-                        proxy_state.metrics.error_counts.with_label_values(&["auth_error"]).inc();
+                        increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+                        increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "auth_error".to_string()).await;
                         return Ok(ProxyError::Unauthorized(err).into());
                     }
                 }
@@ -540,8 +542,8 @@ where
                 if let Some(users) = &auth_config.basic_users {
                     if let Err(err) = validate_basic(&original_req, users).await {
                         error!(request_id = %request_id, "Basic auth validation failed: {}", err);
-                        proxy_state.metrics.failed_requests.inc();
-                        proxy_state.metrics.error_counts.with_label_values(&["auth_error"]).inc();
+                        increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+                        increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "auth_error".to_string()).await;
                         return Ok(ProxyError::Unauthorized(err).into());
                     }
                 }
@@ -565,7 +567,7 @@ where
                 let new_cache_key = create_cache_key(&target_urls[0], &original_req, vary_headers.as_ref());
                 if let Some(entry) = cache.get(&new_cache_key).await {
                     let response_size = entry.response.len();
-                    proxy_state.metrics.response_size_bytes.observe(response_size as f64);
+                    observe_histogram_async(proxy_state.metrics.response_size_bytes.clone(), response_size as f64).await;
                     let mut response = Response::builder()
                         .status(entry.status)
                         .body(Body::from(entry.response.clone()))
@@ -592,9 +594,9 @@ where
                         }
                     }
 
-                    proxy_state.metrics.http_responses_total.inc();
-                    proxy_state.metrics.successful_requests.inc();
-                    proxy_state.metrics.request_duration_seconds.observe(start_time.elapsed().as_secs_f64());
+                    increment_counter_async(proxy_state.metrics.http_responses_total.clone()).await;
+                    increment_counter_async(proxy_state.metrics.successful_requests.clone()).await;
+                    observe_histogram_async(proxy_state.metrics.request_duration_seconds.clone(), start_time.elapsed().as_secs_f64()).await;
 
                     return Ok(response);
                 }
@@ -784,6 +786,30 @@ where
         circuit_breaker.transition_to_open().await;
     }
     Ok(ProxyError::ServiceUnavailable("Maximum retries exceeded".to_string()).into())
+}
+
+async fn increment_counter_async(counter: IntCounter) {
+    tokio::spawn(async move {
+        counter.inc();
+    }).await.unwrap();
+}
+
+async fn increment_counter_with_label_async(counter_vec: IntCounterVec, label: String) {
+    tokio::spawn(async move {
+        counter_vec.with_label_values(&[&label]).inc();
+    }).await.unwrap();
+}
+
+async fn observe_histogram_async(histogram: Histogram, value: f64) {
+    tokio::spawn(async move {
+        histogram.observe(value);
+    }).await.unwrap();
+}
+
+async fn set_gauge_async(gauge: IntGauge, value: i64) {
+    tokio::spawn(async move {
+        gauge.set(value);
+    }).await.unwrap();
 }
 
 fn find_target<'a>(
