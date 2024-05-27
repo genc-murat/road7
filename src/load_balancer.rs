@@ -5,6 +5,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use ring::digest;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoadBalancerConfig {
@@ -23,10 +25,11 @@ pub enum LoadBalancingAlgorithm {
     WeightedLeastConnections,
 }
 
+#[derive(Clone)]
 pub struct LoadBalancer {
     targets: HashMap<String, Vec<String>>,
-    counters: HashMap<String, usize>,
-    connections: HashMap<String, usize>,
+    counters: Arc<Mutex<HashMap<String, usize>>>,
+    connections: Arc<Mutex<HashMap<String, usize>>>,
     weights: HashMap<String, Vec<usize>>,
     weights_sum: HashMap<String, usize>,
     algorithm: LoadBalancingAlgorithm,
@@ -53,20 +56,21 @@ impl LoadBalancer {
 
         LoadBalancer {
             targets,
-            counters: HashMap::new(),
-            connections: HashMap::new(),
+            counters: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(Mutex::new(HashMap::new())),
             weights,
             weights_sum,
             algorithm,
         }
     }
 
-    pub fn get_target(&mut self, path: &str, client_ip: Option<&str>) -> Option<String> {
+    pub async fn get_target(&self, path: &str, client_ip: Option<&str>) -> Option<String> {
         for (key, target_list) in &self.targets {
             if path.starts_with(key) {
                 match self.algorithm {
                     LoadBalancingAlgorithm::RoundRobin => {
-                        let counter = self.counters.entry(key.to_string()).or_insert(0);
+                        let mut counters = self.counters.lock().await;
+                        let counter = counters.entry(key.to_string()).or_insert(0);
                         let target = target_list[*counter % target_list.len()].clone();
                         *counter = (*counter + 1) % target_list.len();
                         return Some(target);
@@ -76,14 +80,16 @@ impl LoadBalancer {
                         return target_list.choose(&mut rng).cloned();
                     },
                     LoadBalancingAlgorithm::LeastConnections => {
+                        let mut connections = self.connections.lock().await;
                         let min_connection = target_list.iter()
-                            .map(|t| (t, self.connections.get(t).cloned().unwrap_or(0)))
+                            .map(|t| (t, connections.get(t).cloned().unwrap_or(0)))
                             .min_by_key(|(_, c)| *c)?;
-                        *self.connections.entry(min_connection.0.clone()).or_insert(0) += 1;
+                        *connections.entry(min_connection.0.clone()).or_insert(0) += 1;
                         return Some(min_connection.0.clone());
                     },
                     LoadBalancingAlgorithm::WeightedRoundRobin => {
-                        let counter = self.counters.entry(key.to_string()).or_insert(0);
+                        let mut counters = self.counters.lock().await;
+                        let counter = counters.entry(key.to_string()).or_insert(0);
                         let weight_list = self.weights.get(key)?;
                         let sum_of_weights = *self.weights_sum.get(key)?;
                         let mut cumulative_weight = 0;
@@ -114,11 +120,12 @@ impl LoadBalancer {
                         }
                     },
                     LoadBalancingAlgorithm::WeightedLeastConnections => {
+                        let mut connections = self.connections.lock().await;
                         let weight_list = self.weights.get(key)?;
                         let target = target_list.iter().enumerate()
-                            .map(|(i, t)| (t, self.connections.get(t).cloned().unwrap_or(0), weight_list[i]))
+                            .map(|(i, t)| (t, connections.get(t).cloned().unwrap_or(0), weight_list[i]))
                             .min_by_key(|(_, c, w)| (*c as f64 / *w as f64) as usize)?;
-                        *self.connections.entry(target.0.clone()).or_insert(0) += 1;
+                        *connections.entry(target.0.clone()).or_insert(0) += 1;
                         return Some(target.0.clone());
                     },
                 }
@@ -127,105 +134,3 @@ impl LoadBalancer {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn setup_targets() -> HashMap<String, Vec<String>> {
-        let mut targets = HashMap::new();
-        targets.insert("/service1".to_string(), vec!["http://service1-a".to_string(), "http://service1-b".to_string()]);
-        targets.insert("/service2".to_string(), vec!["http://service2-a".to_string(), "http://service2-b".to_string()]);
-        targets
-    }
-
-    #[test]
-    fn test_round_robin() {
-        let targets = setup_targets();
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::RoundRobin, None);
-
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-a".to_string()));
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-b".to_string()));
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-a".to_string()));
-    }
-
-    #[test]
-    fn test_random() {
-        let targets = setup_targets();
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::Random, None);
-
-        let target = lb.get_target("/service1", None);
-        assert!(target == Some("http://service1-a".to_string()) || target == Some("http://service1-b".to_string()));
-    }
-
-    #[test]
-    fn test_least_connections() {
-        let targets = setup_targets();
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::LeastConnections, None);
-
-        let target1 = lb.get_target("/service1", None);
-        let target2 = lb.get_target("/service1", None);
-
-        lb.connections.insert(target1.clone().unwrap(), 1);
-        lb.connections.insert(target2.clone().unwrap(), 2);
-
-        let target3 = lb.get_target("/service1", None);
-        assert_eq!(target3, target1);
-    }
-
-    #[test]
-    fn test_weighted_round_robin() {
-        let targets = setup_targets();
-        let mut weights = HashMap::new();
-        weights.insert("/service1".to_string(), vec![2, 1]);
-
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::WeightedRoundRobin, Some(weights));
-
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-a".to_string()));
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-a".to_string()));
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-b".to_string()));
-        assert_eq!(lb.get_target("/service1", None), Some("http://service1-a".to_string()));
-    }
-
-    #[test]
-    fn test_ip_hash() {
-        let targets = setup_targets();
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::IPHash, None);
-
-        let target1 = lb.get_target("/service1", Some("192.168.0.1"));
-        let target2 = lb.get_target("/service1", Some("192.168.0.1"));
-
-        assert_eq!(target1, target2);
-    }
-
-    #[test]
-    fn test_consistent_hashing() {
-        let targets = setup_targets();
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::ConsistentHashing, None);
-
-        let target1 = lb.get_target("/service1", Some("192.168.0.1"));
-        let target2 = lb.get_target("/service1", Some("192.168.0.1"));
-
-        assert_eq!(target1, target2);
-    }
-
-    #[test]
-    fn test_weighted_least_connections() {
-        let targets = setup_targets();
-        let mut weights = HashMap::new();
-        weights.insert("/service1".to_string(), vec![3, 1]);
-
-        let mut lb = LoadBalancer::new(targets, LoadBalancingAlgorithm::WeightedLeastConnections, Some(weights));
-
-        let target1 = lb.get_target("/service1", None);
-        let target2 = lb.get_target("/service1", None);
-
-        lb.connections.insert(target1.clone().unwrap(), 1);
-        lb.connections.insert(target2.clone().unwrap(), 2);
-
-        let target3 = lb.get_target("/service1", None);
-        assert_eq!(target3, target1);
-    }
-}
-

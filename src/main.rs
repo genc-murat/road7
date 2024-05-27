@@ -640,11 +640,12 @@ where
     let max_attempts = retry_strategy.max_attempts();
     while retries < max_attempts {
         let target_url = if let Some(lb) = &proxy_state.load_balancer {
-            let mut lb = lb.write().await;
-            lb.get_target(&path, Some(&client_ip.to_string())).unwrap_or(target_urls[0].clone())
+            let lb = lb.write().await;
+            lb.get_target(&path, Some(&client_ip.to_string())).await.unwrap_or_else(|| target_urls[0].clone())
         } else {
             target_urls[0].clone()
         };
+        
 
         let mut req = rebuild_request(&mut original_req, &target_url, target_url_len, client_ip).await;
         if let Some(ref transforms) = request_transforms {
