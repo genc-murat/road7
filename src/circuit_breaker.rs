@@ -119,3 +119,94 @@ impl CircuitBreaker {
         self.state
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn test_circuit_breaker_initial_state() {
+        let config = CircuitBreakerConfig::default();
+        let circuit_breaker = CircuitBreaker::new(&config);
+
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_record_success_resets_failure_count_and_state() {
+        let config = CircuitBreakerConfig::default();
+        let mut circuit_breaker = CircuitBreaker::new(&config);
+
+        circuit_breaker.record_failure().await;
+        circuit_breaker.record_failure().await;
+        circuit_breaker.record_success().await;
+
+        assert_eq!(circuit_breaker.failure_count, 0);
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_transition_to_open_after_max_failures() {
+        let config = CircuitBreakerConfig::default();
+        let mut circuit_breaker = CircuitBreaker::new(&config);
+
+        for _ in 0..config.max_failures {
+            circuit_breaker.record_failure().await;
+        }
+
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn test_transition_to_half_open_after_reset_timeout() {
+        let config = CircuitBreakerConfig::default();
+        let mut circuit_breaker = CircuitBreaker::new(&config);
+
+        for _ in 0..config.max_failures {
+            circuit_breaker.record_failure().await;
+        }
+
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Open);
+
+        sleep(Duration::from_secs(config.reset_timeout_seconds)).await;
+
+        let can_attempt = circuit_breaker.can_attempt().await;
+        assert!(can_attempt);
+        assert_eq!(circuit_breaker.get_state(), CircuitState::HalfOpen);
+    }
+
+    #[tokio::test]
+    async fn test_transition_back_to_closed_from_half_open_on_success() {
+        let config = CircuitBreakerConfig::default();
+        let mut circuit_breaker = CircuitBreaker::new(&config);
+
+        for _ in 0..config.max_failures {
+            circuit_breaker.record_failure().await;
+        }
+
+        sleep(Duration::from_secs(config.reset_timeout_seconds)).await;
+        circuit_breaker.can_attempt().await;
+
+        circuit_breaker.record_success().await;
+
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_transition_back_to_open_from_half_open_on_failure() {
+        let config = CircuitBreakerConfig::default();
+        let mut circuit_breaker = CircuitBreaker::new(&config);
+
+        for _ in 0..config.max_failures {
+            circuit_breaker.record_failure().await;
+        }
+
+        sleep(Duration::from_secs(config.reset_timeout_seconds)).await;
+        circuit_breaker.can_attempt().await;
+
+        circuit_breaker.record_failure().await;
+
+        assert_eq!(circuit_breaker.get_state(), CircuitState::Open);
+    }
+}
