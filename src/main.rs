@@ -507,8 +507,6 @@ where
         }
     };
 
-    info!(request_id = %request_id, "Checking rate limiter for path: {}", path);
-
     if let Some(rate_limiter) = proxy_state.rate_limiters.get_limiter(&path).await {
         info!(request_id = %request_id, "Rate limiter found for path: {}", path);
         match rate_limiter.acquire().await {
