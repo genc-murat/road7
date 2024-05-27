@@ -134,3 +134,137 @@ impl LoadBalancer {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Mutex;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_round_robin() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::RoundRobin, None);
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target3.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
+    }
+
+    #[tokio::test]
+    async fn test_random() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::Random, None);
+        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_least_connections() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::LeastConnections, None);
+        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_weighted_round_robin() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let mut weights = HashMap::new();
+        weights.insert("/api".to_string(), vec![1, 2, 1]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedRoundRobin, Some(weights.clone()));
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target3.com");
+        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
+    }
+
+    #[tokio::test]
+    async fn test_ip_hash() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::IPHash, None);
+        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_consistent_hashing() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::ConsistentHashing, None);
+        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_weighted_least_connections() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let mut weights = HashMap::new();
+        weights.insert("/api".to_string(), vec![1, 2, 1]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedLeastConnections, Some(weights));
+        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_weighted_least_connections_with_ip() {
+        let mut targets = HashMap::new();
+        targets.insert("/api".to_string(), vec![
+            "http://target1.com".to_string(),
+            "http://target2.com".to_string(),
+            "http://target3.com".to_string(),
+        ]);
+
+        let mut weights = HashMap::new();
+        weights.insert("/api".to_string(), vec![1, 2, 1]);
+
+        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedLeastConnections, Some(weights));
+        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
+        assert!(targets.get("/api").unwrap().contains(&target));
+    }
+}
