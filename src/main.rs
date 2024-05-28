@@ -181,7 +181,6 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
                             let req = req;
                             let client_ip = client_ip;
         
-                            // tokio::spawn çağrısı sonucu işlem ve hataların ele alınması
                             let handle = tokio::spawn(async move {
                                 proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
                                 proxy_state.metrics.http_requests_total.inc();
