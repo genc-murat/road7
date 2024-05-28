@@ -9,7 +9,6 @@ pub trait RetryStrategy: Send + Sync {
 
 pub struct FixedIntervalBackoffStrategy {
     base_delay: Duration,
-    current_attempt: usize,
     max_attempts: usize,
 }
 
@@ -17,7 +16,6 @@ impl FixedIntervalBackoffStrategy {
     pub fn new(base_delay: Duration, max_attempts: usize) -> Self {
         Self {
             base_delay,
-            current_attempt: 1,
             max_attempts,
         }
     }
@@ -342,6 +340,7 @@ impl RetryConfig {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
