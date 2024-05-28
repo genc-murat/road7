@@ -247,15 +247,13 @@ impl RetryStrategy for HarmonicBackoffStrategy {
 pub struct JitterBackoffStrategy {
     strategy: Box<dyn RetryStrategy>,
     jitter_factor: f64,
-    max_attempts: usize,
 }
 
 impl JitterBackoffStrategy {
-    pub fn new(strategy: Box<dyn RetryStrategy>, jitter_factor: f64, max_attempts: usize) -> Self {
+    pub fn new(strategy: Box<dyn RetryStrategy>, jitter_factor: f64) -> Self {
         Self {
             strategy,
             jitter_factor,
-            max_attempts,
         }
     }
 }
@@ -265,13 +263,12 @@ impl RetryStrategy for JitterBackoffStrategy {
         let base_delay = self.strategy.delay();
         let jitter = base_delay.mul_f64(self.jitter_factor);
         let mut rng = thread_rng();
-        let secs = rng.gen_range(0..jitter.as_secs());
-        let nanos = rng.gen_range(0..1_000_000_000);
-        base_delay + Duration::new(secs, nanos as u32)
+        let jitter_secs = rng.gen_range(0.0..jitter.as_secs_f64());
+        base_delay + Duration::from_secs_f64(jitter_secs)
     }
 
     fn max_attempts(&self) -> usize {
-        self.max_attempts
+        self.strategy.max_attempts()
     }
 }
 
@@ -282,11 +279,12 @@ pub struct RetryConfig {
     pub max_attempts: usize,
     pub factor: Option<f64>,
     pub step_delay_seconds: Option<u64>,
+    pub jitter_factor: Option<f64>, // Added jitter_factor field
 }
 
 impl RetryConfig {
     pub fn to_strategy(&self) -> Box<dyn RetryStrategy> {
-        match self.strategy.as_str() {
+        let base_strategy: Box<dyn RetryStrategy> = match self.strategy.as_str() {
             "ExponentialBackoff" => Box::new(ExponentialBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.factor.unwrap_or(2.0),
@@ -324,19 +322,16 @@ impl RetryConfig {
                 Duration::from_secs(self.base_delay_seconds),
                 self.max_attempts,
             )),
-            "JitterBackoff" => Box::new(JitterBackoffStrategy::new(
-                Box::new(ExponentialBackoffStrategy::new(
-                    Duration::from_secs(self.base_delay_seconds),
-                    self.factor.unwrap_or(2.0),
-                    self.max_attempts
-                )),
-                0.5,
-                self.max_attempts,
-            )),
             _ => Box::new(FixedIntervalBackoffStrategy::new(
                 Duration::from_secs(self.base_delay_seconds),
                 self.max_attempts,
             )),
+        };
+
+        if let Some(jitter_factor) = self.jitter_factor {
+            Box::new(JitterBackoffStrategy::new(base_strategy, jitter_factor))
+        } else {
+            base_strategy
         }
     }
 }
@@ -408,7 +403,7 @@ mod tests {
     fn test_harmonic_backoff() {
         let mut strategy = HarmonicBackoffStrategy::new(Duration::from_secs(10), 3);
         assert_eq!(strategy.delay(), Duration::from_secs(10));
-        assert_eq!(strategy.delay(), Duration::from_secs(5)); 
+        assert_eq!(strategy.delay(), Duration::from_secs(5));
 
         let expected_delay = Duration::from_secs_f64(10.0 / 3.0);
         let actual_delay = strategy.delay();
@@ -427,7 +422,7 @@ mod tests {
     #[test]
     fn test_jitter_backoff() {
         let base_strategy = ExponentialBackoffStrategy::new(Duration::from_secs(1), 2.0, 3);
-        let mut strategy = JitterBackoffStrategy::new(Box::new(base_strategy), 0.5, 3);
+        let mut strategy = JitterBackoffStrategy::new(Box::new(base_strategy), 0.5);
         let base_delay = strategy.strategy.delay();
         let delay = strategy.delay();
         assert!(delay >= base_delay);
@@ -442,6 +437,7 @@ mod tests {
             max_attempts: 3,
             factor: Some(2.0),
             step_delay_seconds: None,
+            jitter_factor: None,
         };
         let mut strategy = config.to_strategy();
         assert_eq!(strategy.delay(), Duration::from_secs_f64(1.0 * 2f64.powf(1.0)));
