@@ -59,6 +59,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Builder;
 
 const POOL_IDLE_TIMEOUT: u64 = 30;
+const SHUTDOWN_TIMEOUT: u64 = 30;
 
 async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(Metrics::new());
@@ -238,9 +239,17 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         signal::ctrl_c().await.expect("Failed to capture CTRL+C signal");
         info!("Shutdown signal received, completing pending requests...");
 
+        let shutdown_timeout = Duration::from_secs(SHUTDOWN_TIMEOUT);
+        let start_time = Instant::now();
+
         while proxy_state_for_shutdown.ongoing_requests.load(Ordering::SeqCst) > 0 {
+            if start_time.elapsed() > shutdown_timeout {
+                warn!("Shutdown timeout reached, forcing shutdown.");
+                break;
+            }
             sleep(Duration::from_millis(100)).await;
         }
+
         proxy_state_for_shutdown.shutdown().await;
         info!("All pending requests completed. Shutting down...");
     });
