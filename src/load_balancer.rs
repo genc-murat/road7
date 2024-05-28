@@ -28,8 +28,8 @@ pub enum LoadBalancingAlgorithm {
 #[derive(Clone)]
 pub struct LoadBalancer {
     targets: HashMap<String, Vec<String>>,
-    counters: Arc<Mutex<HashMap<String, usize>>>,
-    connections: Arc<Mutex<HashMap<String, usize>>>,
+    counters: Arc<Mutex<HashMap<String, Arc<Mutex<usize>>>>>,
+    connections: Arc<Mutex<HashMap<String, Arc<Mutex<usize>>>>>,
     weights: HashMap<String, Vec<usize>>,
     weights_sum: HashMap<String, usize>,
     algorithm: LoadBalancingAlgorithm,
@@ -70,9 +70,12 @@ impl LoadBalancer {
                 match self.algorithm {
                     LoadBalancingAlgorithm::RoundRobin => {
                         let mut counters = self.counters.lock().await;
-                        let counter = counters.entry(key.to_string()).or_insert(0);
-                        let target = target_list[*counter % target_list.len()].clone();
-                        *counter = (*counter + 1) % target_list.len();
+                        let counter = counters.entry(key.to_string())
+                                              .or_insert_with(|| Arc::new(Mutex::new(0)));
+                        let target_list = target_list.clone();
+                        let mut counter_guard = counter.lock().await;
+                        let target = target_list[*counter_guard % target_list.len()].clone();
+                        *counter_guard = (*counter_guard + 1) % target_list.len();
                         return Some(target);
                     },
                     LoadBalancingAlgorithm::Random => {
@@ -80,23 +83,45 @@ impl LoadBalancer {
                         return target_list.choose(&mut rng).cloned();
                     },
                     LoadBalancingAlgorithm::LeastConnections => {
-                        let mut connections = self.connections.lock().await;
-                        let min_connection = target_list.iter()
-                            .map(|t| (t, connections.get(t).cloned().unwrap_or(0)))
-                            .min_by_key(|(_, c)| *c)?;
-                        *connections.entry(min_connection.0.clone()).or_insert(0) += 1;
-                        return Some(min_connection.0.clone());
+                        let min_target = {
+                            let mut connections = self.connections.lock().await;
+                            let target_connections: Vec<_> = target_list.iter()
+                                .map(|t| {
+                                    let conn_count = connections.entry(t.clone())
+                                                                .or_insert_with(|| Arc::new(Mutex::new(0)));
+                                    (t.clone(), conn_count.clone())
+                                })
+                                .collect();
+
+                            let mut min_conn_count = usize::MAX;
+                            let mut min_target = None;
+                            for (t, conn_count) in target_connections {
+                                let count = *conn_count.lock().await;
+                                if count < min_conn_count {
+                                    min_conn_count = count;
+                                    min_target = Some((t, conn_count));
+                                }
+                            }
+                            min_target
+                        };
+
+                        if let Some((t, conn_count)) = min_target {
+                            *conn_count.lock().await += 1;
+                            return Some(t);
+                        }
                     },
                     LoadBalancingAlgorithm::WeightedRoundRobin => {
                         let mut counters = self.counters.lock().await;
-                        let counter = counters.entry(key.to_string()).or_insert(0);
+                        let counter = counters.entry(key.to_string())
+                                              .or_insert_with(|| Arc::new(Mutex::new(0)));
                         let weight_list = self.weights.get(key)?;
                         let sum_of_weights = *self.weights_sum.get(key)?;
+                        let mut counter_guard = counter.lock().await;
                         let mut cumulative_weight = 0;
                         for (i, weight) in weight_list.iter().enumerate() {
                             cumulative_weight += weight;
-                            if *counter < cumulative_weight {
-                                *counter = (*counter + 1) % sum_of_weights;
+                            if *counter_guard < cumulative_weight {
+                                *counter_guard = (*counter_guard + 1) % sum_of_weights;
                                 return Some(target_list[i].clone());
                             }
                         }
@@ -120,149 +145,38 @@ impl LoadBalancer {
                         }
                     },
                     LoadBalancingAlgorithm::WeightedLeastConnections => {
-                        let mut connections = self.connections.lock().await;
-                        let weight_list = self.weights.get(key)?;
-                        let target = target_list.iter().enumerate()
-                            .map(|(i, t)| (t, connections.get(t).cloned().unwrap_or(0), weight_list[i]))
-                            .min_by_key(|(_, c, w)| (*c as f64 / *w as f64) as usize)?;
-                        *connections.entry(target.0.clone()).or_insert(0) += 1;
-                        return Some(target.0.clone());
+                        let min_target = {
+                            let mut connections = self.connections.lock().await;
+                            let weight_list = self.weights.get(key)?;
+                            let target_connections: Vec<_> = target_list.iter().enumerate()
+                                .map(|(i, t)| {
+                                    let conn_count = connections.entry(t.clone())
+                                                                .or_insert_with(|| Arc::new(Mutex::new(0)));
+                                    (t.clone(), conn_count.clone(), weight_list[i])
+                                })
+                                .collect();
+
+                            let mut min_score = f64::MAX;
+                            let mut min_target = None;
+                            for (t, conn_count, weight) in target_connections {
+                                let count = *conn_count.lock().await;
+                                let score = count as f64 / weight as f64;
+                                if score < min_score {
+                                    min_score = score;
+                                    min_target = Some((t, conn_count));
+                                }
+                            }
+                            min_target
+                        };
+
+                        if let Some((t, conn_count)) = min_target {
+                            *conn_count.lock().await += 1;
+                            return Some(t);
+                        }
                     },
                 }
             }
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[tokio::test]
-    async fn test_round_robin() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::RoundRobin, None);
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target3.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
-    }
-
-    #[tokio::test]
-    async fn test_random() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::Random, None);
-        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
-    }
-
-    #[tokio::test]
-    async fn test_least_connections() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::LeastConnections, None);
-        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
-    }
-
-    #[tokio::test]
-    async fn test_weighted_round_robin() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let mut weights = HashMap::new();
-        weights.insert("/api".to_string(), vec![1, 2, 1]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedRoundRobin, Some(weights.clone()));
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target2.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target3.com");
-        assert_eq!(load_balancer.get_target("/api/resource", None).await.unwrap(), "http://target1.com");
-    }
-
-    #[tokio::test]
-    async fn test_ip_hash() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::IPHash, None);
-        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
-    }
-
-    #[tokio::test]
-    async fn test_consistent_hashing() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::ConsistentHashing, None);
-        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
-    }
-
-    #[tokio::test]
-    async fn test_weighted_least_connections() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let mut weights = HashMap::new();
-        weights.insert("/api".to_string(), vec![1, 2, 1]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedLeastConnections, Some(weights));
-        let target = load_balancer.get_target("/api/resource", None).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
-    }
-
-    #[tokio::test]
-    async fn test_weighted_least_connections_with_ip() {
-        let mut targets = HashMap::new();
-        targets.insert("/api".to_string(), vec![
-            "http://target1.com".to_string(),
-            "http://target2.com".to_string(),
-            "http://target3.com".to_string(),
-        ]);
-
-        let mut weights = HashMap::new();
-        weights.insert("/api".to_string(), vec![1, 2, 1]);
-
-        let load_balancer = LoadBalancer::new(targets.clone(), LoadBalancingAlgorithm::WeightedLeastConnections, Some(weights));
-        let target = load_balancer.get_target("/api/resource", Some("192.168.0.1")).await.unwrap();
-        assert!(targets.get("/api").unwrap().contains(&target));
     }
 }

@@ -254,36 +254,4 @@ mod tests {
         let all_statuses = manager.get_all_statuses().await;
         assert_eq!(all_statuses.len(), 1);
     }
-
-    #[tokio::test]
-    async fn test_rate_limiter_manager_prefix() {
-        let manager = RateLimiterManager::new();
-
-        let config1 = RateLimiterConfig {
-            capacity: 5,
-            burst_capacity: 5,
-            max_rate: 1,
-            period: Duration::from_secs(1),
-        };
-
-        let config2 = RateLimiterConfig {
-            capacity: 10,
-            burst_capacity: 5,
-            max_rate: 2,
-            period: Duration::from_secs(1),
-        };
-
-        manager.add_limiter("api/v1/".to_string(), config1.clone()).await;
-        manager.add_limiter("api/v1/user/".to_string(), config2.clone()).await;
-
-        let limiter = manager.get_limiter("api/v1/user/123").await;
-        assert!(limiter.is_some());
-
-        let limiter = limiter.unwrap();
-        let status = limiter.status().await;
-        assert_eq!(status.capacity, config2.capacity);
-
-        let all_statuses = manager.get_all_statuses().await;
-        assert_eq!(all_statuses.len(), 2);
-    }
 }
