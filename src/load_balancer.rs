@@ -180,3 +180,118 @@ impl LoadBalancer {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    async fn create_test_load_balancer(algorithm: LoadBalancingAlgorithm) -> LoadBalancer {
+        let targets = HashMap::from([
+            ("/api".to_string(), vec!["http://localhost:8080".to_string(), "http://localhost:8081".to_string()]),
+        ]);
+        let weights = Some(HashMap::from([
+            ("/api".to_string(), vec![3, 1]),
+        ]));
+        LoadBalancer::new(targets, algorithm, weights)
+    }
+
+    #[tokio::test]
+    async fn test_round_robin() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::RoundRobin).await;
+
+        let target1 = lb.get_target("/api/resource", None).await.unwrap();
+        let target2 = lb.get_target("/api/resource", None).await.unwrap();
+        let target3 = lb.get_target("/api/resource", None).await.unwrap();
+
+        assert_eq!(target1, "http://localhost:8080");
+        assert_eq!(target2, "http://localhost:8081");
+        assert_eq!(target3, "http://localhost:8080");
+    }
+
+    #[tokio::test]
+    async fn test_random() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::Random).await;
+
+        let target1 = lb.get_target("/api/resource", None).await.unwrap();
+        let target2 = lb.get_target("/api/resource", None).await.unwrap();
+
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target1.as_str()));
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target2.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_least_connections() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::LeastConnections).await;
+
+        let target1 = lb.get_target("/api/resource", None).await.unwrap();
+        let target2 = lb.get_target("/api/resource", None).await.unwrap();
+
+        assert_eq!(target1, "http://localhost:8080");
+        assert_eq!(target2, "http://localhost:8081");
+    }
+
+    #[tokio::test]
+    async fn test_weighted_round_robin() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::WeightedRoundRobin).await;
+
+        let target1 = lb.get_target("/api/resource", None).await.unwrap();
+        let target2 = lb.get_target("/api/resource", None).await.unwrap();
+        let target3 = lb.get_target("/api/resource", None).await.unwrap();
+        let target4 = lb.get_target("/api/resource", None).await.unwrap();
+
+        assert_eq!(target1, "http://localhost:8080");
+        assert_eq!(target2, "http://localhost:8080");
+        assert_eq!(target3, "http://localhost:8080");
+        assert_eq!(target4, "http://localhost:8081");
+    }
+
+    #[tokio::test]
+    async fn test_ip_hash() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::IPHash).await;
+
+        let target1 = lb.get_target("/api/resource", Some("192.168.1.1")).await.unwrap();
+        let target2 = lb.get_target("/api/resource", Some("192.168.1.2")).await.unwrap();
+
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target1.as_str()));
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target2.as_str()));
+        assert_ne!(target1, target2);
+    }
+
+    #[tokio::test]
+    async fn test_consistent_hashing() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::ConsistentHashing).await;
+
+        let target1 = lb.get_target("/api/resource", Some("192.168.1.1")).await.unwrap();
+        let target2 = lb.get_target("/api/resource", Some("192.168.1.2")).await.unwrap();
+
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target1.as_str()));
+        assert!(["http://localhost:8080", "http://localhost:8081"].contains(&target2.as_str()));
+        assert_ne!(target1, target2);
+    }
+
+    #[tokio::test]
+    async fn test_weighted_least_connections() {
+        let lb = create_test_load_balancer(LoadBalancingAlgorithm::WeightedLeastConnections).await;
+
+        let target1 = lb.get_target("/api/resource", None).await.unwrap();
+        let target2 = lb.get_target("/api/resource", None).await.unwrap();
+
+        // Ensure that the least connected target is selected considering weights
+        // http://localhost:8080 should be selected 3 times more often than http://localhost:8081
+        let mut count_8080 = 0;
+        let mut count_8081 = 0;
+
+        for _ in 0..100 {
+            let target = lb.get_target("/api/resource", None).await.unwrap();
+            if target == "http://localhost:8080" {
+                count_8080 += 1;
+            } else if target == "http://localhost:8081" {
+                count_8081 += 1;
+            }
+        }
+
+        assert!(count_8080 > count_8081 * 3 / 4);
+    }
+}
+
