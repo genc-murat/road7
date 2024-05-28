@@ -140,7 +140,7 @@ impl LoadBalancer {
                             let mut context = digest::Context::new(&digest::SHA256);
                             context.update(ip.as_bytes());
                             let hash = context.finish();
-                            let index = (u64::from_le_bytes(hash.as_ref()[..8].try_into().unwrap()) % target_list.len() as u64) as usize;
+                            let index = (u64::from_le_bytes(hash.as_ref()[..8].try_into().unwrap_or_default()) % target_list.len() as u64) as usize;
                             return Some(target_list[index].clone());
                         }
                     },
