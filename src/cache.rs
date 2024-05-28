@@ -9,6 +9,7 @@ use hyper::header::{HeaderMap, HeaderValue, VARY};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CorsConfig {
@@ -35,14 +36,13 @@ fn default_cleanup_interval() -> u64 {
     60
 }
 
-
 fn default_serialize() -> bool {
     false
 }
 
 #[derive(Debug, Clone)]
 pub struct Cache {
-    pub entries: Arc<DashMap<String, CacheEntry>>,
+    pub entries: Arc<DashMap<String, Arc<Mutex<CacheEntry>>>>,
     pub ttl: Duration,
     pub serialize: bool,
 }
@@ -126,12 +126,14 @@ impl Cache {
 
     pub async fn get(&self, key: &str) -> Option<CacheEntry> {
         if let Some(entry) = self.entries.get(key) {
-            if entry.expires_at > Instant::now() {
+            let entry = entry.value().clone();
+            let entry_guard = entry.lock().await;
+            if entry_guard.expires_at > Instant::now() {
                 info!("Cache hit for key: {}", key);
-                return Some(entry.clone());
+                return Some(entry_guard.clone());
             } else {
                 warn!("Cache entry expired for key: {}", key);
-                self.remove_expired(key).await;
+                self.entries.remove(key);
             }
         }
         info!("Cache miss for key: {}", key);
@@ -159,24 +161,28 @@ impl Cache {
             last_modified: response.last_modified.clone(),
             vary_headers: response.vary_headers.clone(),
         };
-        self.entries.insert(key.clone(), entry);
+        self.entries.insert(key.clone(), Arc::new(Mutex::new(entry)));
         info!("Cache updated for key: {}", key);
-    }
-
-    pub async fn remove_expired(&self, key: &str) {
-        self.entries.remove(key);
-        warn!("Cache entry removed for key: {}", key);
     }
 
     pub async fn clean_expired_entries(&self) {
         let now = Instant::now();
         let keys_to_remove: Vec<String> = self.entries.iter()
-            .filter(|entry| entry.value().expires_at <= now)
-            .map(|entry| entry.key().clone())
+            .filter_map(|entry| {
+                let key = entry.key().clone();
+                let entry = entry.value().clone();
+                let entry_guard = futures::executor::block_on(entry.lock());
+                if entry_guard.expires_at <= now {
+                    Some(key)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for key in keys_to_remove {
-            self.remove_expired(&key).await;
+            self.entries.remove(&key);
+            warn!("Cache entry removed for key: {}", key);
         }
     }
 }
