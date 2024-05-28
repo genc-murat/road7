@@ -151,64 +151,84 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT))
         .build(https_connector);
 
-    let make_svc = {
-        let proxy_state = Arc::clone(&proxy_state);
-        let retry_config = Arc::new(config.retries);
-        let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
-        let default_timeout_seconds = config.default_timeout_seconds;
-        let security_headers_config = Arc::new(config.security_headers_config.clone());
-
-        make_service_fn(move |conn: &AddrStream| {
+        let make_svc = {
             let proxy_state = Arc::clone(&proxy_state);
-            let retry_config = Arc::clone(&retry_config);
-            let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-            let client = client.clone();
-            let security_headers_config = Arc::clone(&security_headers_config);
-
-            let client_ip = conn.remote_addr();
-
-            async move {
-                Ok::<_, Infallible>(service_fn(move |req| {
-                    let proxy_state = Arc::clone(&proxy_state);
-                    let retry_config = Arc::clone(&retry_config);
-                    let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
-                    let client = client.clone();
-                    let security_headers_config = Arc::clone(&security_headers_config);
-
-                    async move {
-                        proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
-                        proxy_state.metrics.http_requests_total.inc();
-                        proxy_state.metrics.ongoing_requests.inc();
-                        proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
-
-                        if let Some(bot_detector) = &proxy_state.bot_detector {
-                            if is_bot_request(&req, bot_detector).await {
-                                warn!("Bot detected and request rejected: {:?}", req);
-                                increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
-                                increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "bot_detected".to_string()).await;
-                                return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
+            let retry_config = Arc::new(config.retries);
+            let default_circuit_breaker_config = Arc::new(config.default_circuit_breaker_config);
+            let default_timeout_seconds = config.default_timeout_seconds;
+            let security_headers_config = Arc::new(config.security_headers_config.clone());
+        
+            make_service_fn(move |conn: &AddrStream| {
+                let proxy_state = Arc::clone(&proxy_state);
+                let retry_config = Arc::clone(&retry_config);
+                let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
+                let client = client.clone();
+                let security_headers_config = Arc::clone(&security_headers_config);
+        
+                let client_ip = conn.remote_addr();
+        
+                async move {
+                    Ok::<_, Infallible>(service_fn(move |req| {
+                        let proxy_state = Arc::clone(&proxy_state);
+                        let retry_config = Arc::clone(&retry_config);
+                        let default_circuit_breaker_config = Arc::clone(&default_circuit_breaker_config);
+                        let client = client.clone();
+                        let security_headers_config = Arc::clone(&security_headers_config);
+        
+                        async move {
+                            let proxy_state = Arc::clone(&proxy_state);
+                            let req = req;
+                            let client_ip = client_ip;
+        
+                            // tokio::spawn çağrısı sonucu işlem ve hataların ele alınması
+                            let handle = tokio::spawn(async move {
+                                proxy_state.ongoing_requests.fetch_add(1, Ordering::SeqCst);
+                                proxy_state.metrics.http_requests_total.inc();
+                                proxy_state.metrics.ongoing_requests.inc();
+                                proxy_state.metrics.http_method_counts.with_label_values(&[req.method().as_str()]).inc();
+        
+                                if let Some(bot_detector) = &proxy_state.bot_detector {
+                                    if is_bot_request(&req, bot_detector).await {
+                                        warn!("Bot detected and request rejected: {:?}", req);
+                                        increment_counter_async(proxy_state.metrics.failed_requests.clone()).await;
+                                        increment_counter_with_label_async(proxy_state.metrics.error_counts.clone(), "bot_detected".to_string()).await;
+                                        return Ok(ProxyError::Forbidden("Bot detected".to_string()).into());
+                                    }
+                                }
+        
+                                let response = proxy_request(
+                                    req,
+                                    client_ip,
+                                    Arc::clone(&proxy_state),
+                                    retry_config,
+                                    default_circuit_breaker_config,
+                                    default_timeout_seconds,
+                                    security_headers_config,
+                                    client,
+                                ).await;
+        
+                                proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
+                                proxy_state.metrics.ongoing_requests.dec();
+                                response
+                            });
+        
+                            match handle.await {
+                                Ok(response) => response,
+                                Err(e) => {
+                                    error!("Failed to handle request: {}", e);
+                                    Ok(Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from("Internal Server Error"))
+                                        .unwrap())
+                                }
                             }
                         }
-                        
-
-                        let response = proxy_request(
-                            req,
-                            client_ip,
-                            Arc::clone(&proxy_state),
-                            retry_config,
-                            default_circuit_breaker_config,
-                            default_timeout_seconds,
-                            security_headers_config,
-                            client,
-                        ).await;
-                        proxy_state.ongoing_requests.fetch_sub(1, Ordering::SeqCst);
-                        proxy_state.metrics.ongoing_requests.dec();
-                        response
-                    }
-                }))
-            }
-        })
-    };
+                    }))
+                }
+            })
+        };
+        
+        
 
     let server = Server::bind(&addr).serve(make_svc);
     info!("Proxy is listening on {}", addr);
@@ -227,6 +247,7 @@ async fn run_proxy(config: ProxyConfig) -> Result<(), Box<dyn std::error::Error>
 
     graceful.await.map_err(Into::into)
 }
+
 
 async fn proxy_request<C>(
     mut original_req: Request<Body>,
